@@ -43,6 +43,7 @@ import * as m038 from "./038_registry_plugin_state.js";
 import * as m039 from "./039_fix_fts5_triggers.js";
 import * as m040 from "./040_byline_i18n.js";
 import * as m041 from "./041_content_locale_list_index.js";
+import * as m042 from "./042_byline_fields.js";
 
 const MIGRATIONS: Readonly<Record<string, Migration>> = Object.freeze({
 	"001_initial": m001,
@@ -85,6 +86,7 @@ const MIGRATIONS: Readonly<Record<string, Migration>> = Object.freeze({
 	"039_fix_fts5_triggers": m039,
 	"040_byline_i18n": m040,
 	"041_content_locale_list_index": m041,
+	"042_byline_fields": m042,
 });
 
 /** Total number of registered migrations. Exported for use in tests. */
