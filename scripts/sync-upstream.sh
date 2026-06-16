@@ -93,5 +93,6 @@ if [ -f "$AIKIT_SITE/package.json" ]; then
   echo "@emdash-cms/cloudflare (latest): $(git tag -l '@emdash-cms/cloudflare@*' --sort=-version:refname | head -1 2>/dev/null | sed 's/@emdash-cms\/cloudflare@//')"
 fi
 
+echo "$CURRENT_HASH" > "$STATE_FILE"
 echo ""
 echo "STATE_UPDATED: $CURRENT_HASH"

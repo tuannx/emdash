@@ -83,6 +83,9 @@ examples/wp-theme-unit-test/
 .perf-query-counts
 query-counts-out/
 
+# Local upstream sync state for the scheduled fork sync cron job
+.upstream-last-hash
+
 # Generated query-dump artefacts; tooling lives in scripts/query-dumps/ but
 # the per-run JSON and classification reports regenerate from the harness.
 scripts/query-dumps/sqlite/
