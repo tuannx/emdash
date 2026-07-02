@@ -1,5 +1,40 @@
 # @emdash-cms/admin
 
+## 0.26.0
+
+### Patch Changes
+
+- [#1570](https://github.com/emdash-cms/emdash/pull/1570) [`dc32673`](https://github.com/emdash-cms/emdash/commit/dc32673b013f3ef5fcf7c23159b774d5ed1b8c60) Thanks [@marcusbellamyshaw-cell](https://github.com/marcusbellamyshaw-cell)! - Fixes a crash on the content list when an action that refetches (changing the sort, fast navigation) coincides with a load error. Closes [#1415](https://github.com/emdash-cms/emdash/issues/1415).
+
+- [#1673](https://github.com/emdash-cms/emdash/pull/1673) [`fe832ce`](https://github.com/emdash-cms/emdash/commit/fe832ce224b55ea5d83cb5652cc38a8035a574db) Thanks [@ascorbic](https://github.com/ascorbic)! - Fixes the code block language picker losing focus and closing as soon as you type in it. You can now type to filter and choose a language.
+
+- Updated dependencies []:
+  - @emdash-cms/blocks@0.26.0
+
+## 0.25.1
+
+### Patch Changes
+
+- [#1594](https://github.com/emdash-cms/emdash/pull/1594) [`3960d49`](https://github.com/emdash-cms/emdash/commit/3960d49035150437212cbc204d7dd8da6f5bce61) Thanks [@ArtisanXL](https://github.com/ArtisanXL)! - Add Turkish admin UI translations.
+
+- Updated dependencies []:
+  - @emdash-cms/blocks@0.25.1
+
+## 0.25.0
+
+### Minor Changes
+
+- [#1657](https://github.com/emdash-cms/emdash/pull/1657) [`e277989`](https://github.com/emdash-cms/emdash/commit/e277989a89696b2b9211a9f0b898f7e7dcc99293) Thanks [@swissky](https://github.com/swissky)! - Adds search/typeahead to `select` sub-fields inside repeater fields. Long option lists (for example taxonomy-derived options) are now filterable as you type instead of a plain scrolling dropdown.
+
+### Patch Changes
+
+- [#1663](https://github.com/emdash-cms/emdash/pull/1663) [`8c4108e`](https://github.com/emdash-cms/emdash/commit/8c4108e58a9547af158d60e729f070335b0dd957) Thanks [@scottbuscemi](https://github.com/scottbuscemi)! - Fixes the pointer cursor not showing when hovering the "Log out" button in the admin user menu.
+
+- [#1627](https://github.com/emdash-cms/emdash/pull/1627) [`1ad7b6d`](https://github.com/emdash-cms/emdash/commit/1ad7b6d4cfb51a7c3cf592ad4af987c08a7ca897) Thanks [@nemvalid](https://github.com/nemvalid)! - Adds Hungarian translations for the admin UI.
+
+- Updated dependencies []:
+  - @emdash-cms/blocks@0.25.0
+
 ## 0.24.1
 
 ### Patch Changes
