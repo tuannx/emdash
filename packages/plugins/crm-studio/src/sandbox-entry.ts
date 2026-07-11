@@ -3,6 +3,7 @@ import type { CrmContext } from "./types.js";
 import { handleAdmin } from "./presentation/admin.js";
 import {
   handleBootstrap,
+  handleCloudflareReportSync,
   handleFileConfigLoad,
   handleFileConfigStatus,
   handleMetricFactsIngest,
@@ -18,7 +19,12 @@ import {
   handleSegmentsList,
   handleSegmentUpsert,
   handleStatisticsSummary,
-  handleTemplateUpsert
+  handleTemplateUpsert,
+  handleTrackedEmailSend,
+  handleTrackingClick,
+  handleTrackingMetricsMaterialize,
+  handleTrackingOpen,
+  handleTrackingUnsubscribe
 } from "./presentation/routes.js";
 
 export default {
@@ -46,6 +52,39 @@ export default {
     "v1/config/file/load": {
       handler: async function(routeCtx, ctx) {
         return await handleFileConfigLoad(routeCtx, ctx as unknown as CrmContext);
+      }
+    },
+    "v1/deliveries/send": {
+      handler: async function(routeCtx, ctx) {
+        return await handleTrackedEmailSend(routeCtx, ctx as unknown as CrmContext);
+      }
+    },
+    "v1/providers/cloudflare/report-sync": {
+      handler: async function(routeCtx, ctx) {
+        return await handleCloudflareReportSync(routeCtx, ctx as unknown as CrmContext);
+      }
+    },
+    "v1/metrics/materialize-tracking": {
+      handler: async function(routeCtx, ctx) {
+        return await handleTrackingMetricsMaterialize(routeCtx, ctx as unknown as CrmContext);
+      }
+    },
+    "v1/tracking/open": {
+      public: true,
+      handler: async function(routeCtx, ctx) {
+        return await handleTrackingOpen(routeCtx, ctx as unknown as CrmContext);
+      }
+    },
+    "v1/tracking/click": {
+      public: true,
+      handler: async function(routeCtx, ctx) {
+        return await handleTrackingClick(routeCtx, ctx as unknown as CrmContext);
+      }
+    },
+    "v1/tracking/unsubscribe": {
+      public: true,
+      handler: async function(routeCtx, ctx) {
+        return await handleTrackingUnsubscribe(routeCtx, ctx as unknown as CrmContext);
       }
     },
     "v1/profiles/upsert-batch": {

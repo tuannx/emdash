@@ -38,6 +38,14 @@ import { checkReceipt, ensureDefaults, writeReceipt } from "../infrastructure/re
 import { serializeMutation } from "../infrastructure/mutation-queue.js";
 import { buildOperationalStatistics } from "../application/build-operational-statistics.js";
 import { inspectFileConfig, loadFileConfig } from "../application/manage-file-config.js";
+import {
+  buildTrackingMetricFact,
+  observeClick,
+  observeOpen,
+  observeUnsubscribe,
+  sendTrackedEmail,
+  syncCloudflareReport
+} from "../application/manage-email-tracking.js";
 
 interface MutationOperation {
   (envelope: MutationEnvelope, payloadFingerprint: string): Promise<JsonRecord>;
@@ -214,6 +222,58 @@ export async function handleFileConfigLoad(routeCtx: SandboxedRouteInput, ctx: C
     }
     return await loadFileConfig(ctx, envelope.request_id, envelope.occurred_at, envelope.dry_run);
   });
+}
+
+export async function handleTrackedEmailSend(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {
+  return await runMutation(ctx, routeCtx, "v1/deliveries/send", async function(envelope) {
+    return await sendTrackedEmail(ctx, envelope.input, envelope.request_id, envelope.occurred_at, envelope.dry_run);
+  });
+}
+
+export async function handleCloudflareReportSync(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {
+  return await runMutation(ctx, routeCtx, "v1/providers/cloudflare/report-sync", async function(envelope) {
+    if (envelope.dry_run) return apiError("DRY_RUN_UNSUPPORTED", "Provider report sync is read-through and does not support dry_run");
+    return await syncCloudflareReport(ctx, envelope.input);
+  });
+}
+
+export async function handleTrackingMetricsMaterialize(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {
+  return await runMutation(ctx, routeCtx, "v1/metrics/materialize-tracking", async function(envelope, payloadFingerprint) {
+    var programKey = typeof envelope.input.program_key === "string" ? envelope.input.program_key.trim() : "";
+    var periodKey = typeof envelope.input.period_key === "string" ? envelope.input.period_key.trim() : "";
+    if (!programKey || !periodKey) return apiError("INVALID_TRACKING_SCOPE", "program_key and period_key are required");
+    var built = await buildTrackingMetricFact(ctx, programKey, periodKey, envelope.dry_run);
+    if (built.ok !== true || !isJsonRecord(built.data) || !isJsonRecord(built.data.fact)) return built;
+    var metricInput: JsonRecord = { program_key: programKey, facts: [built.data.fact] };
+    var ingested = await ingestMetricFactsBatch(
+      ctx,
+      metricInput,
+      envelope.request_id,
+      envelope.occurred_at,
+      envelope.dry_run,
+      "crm_tracking",
+      payloadFingerprint
+    );
+    if (ingested.ok === true && isJsonRecord(ingested.data)) ingested.data.tracking_observations = built.data.observations;
+    return ingested;
+  });
+}
+
+export async function handleTrackingOpen(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {
+  var methodError = requireMethod(routeCtx.request.method, "GET");
+  if (methodError) return methodError;
+  return await observeOpen(ctx, routeCtx.request.url, routeCtx.request.headers);
+}
+
+export async function handleTrackingClick(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {
+  var methodError = requireMethod(routeCtx.request.method, "GET");
+  if (methodError) return methodError;
+  return await observeClick(ctx, routeCtx.request.url, routeCtx.request.headers);
+}
+
+export async function handleTrackingUnsubscribe(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {
+  if (routeCtx.request.method !== "GET" && routeCtx.request.method !== "POST") return apiError("METHOD_NOT_ALLOWED", "This route requires GET or POST");
+  return await observeUnsubscribe(ctx, routeCtx.request.url, routeCtx.request.headers, routeCtx.request.method === "POST");
 }
 
 export async function handleProfilesUpsert(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {

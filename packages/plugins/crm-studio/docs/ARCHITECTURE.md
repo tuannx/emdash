@@ -14,10 +14,12 @@
 | Growth programs | Implemented as configuration | Stable keys, offer/safety/measurement contract, readiness scoring and active-config gate |
 | Aggregate metric facts | Implemented | Strict no-PII schema, max 16 per request, append-only correction sequences pinned to configuration/evidence |
 | Program score runs | Implemented | Formula-versioned, input-fingerprinted readiness/performance score snapshots |
-| Suppressions | Storage reserved | Enforcement belongs to the delivery phase; no live send exists in V1 |
+| Suppressions | Enforced | Re-checked immediately before every bounded tracked send; one-click unsubscribe writes a global email suppression |
 | Funnels/enrollments | Deferred | Requires a reliable scheduler and product policy decisions |
 | Durable message outbox | Deferred | Requires transactional claim/retry semantics beyond plugin storage |
-| Email transport/compliance | Deferred | Current sandbox email API lacks required sender/header/provider controls |
+| Email transport/compliance | Bounded per-recipient | Cloudflare Email Service REST with safety re-checks and compliance headers; no bulk journey/outbox |
+| Click/open tracking | Implemented | Opaque token ledger plus site-owned raw redirect/GIF wrappers; opens excluded from scoring |
+| Provider reports | Implemented, bounded | Cloudflare GraphQL event sync with fail-closed recipient/subject/time correlation |
 | Open/click/unsubscribe HTTP | Deferred | Plugin routes cannot return raw GIF, redirect, or HTML responses |
 
 ## Bounded contexts
@@ -213,20 +215,21 @@ This prevents an unknown `paid_tv_access` value from passing a negated safety
 rule and being treated as an eligible acquisition target.
 
 Generation membership is still a point-in-time segment snapshot, not proof of
-current send eligibility. A future delivery layer must re-read the profile and
-apply consent, health, reachability, blacklist, and suppression gates at the
-last responsible moment.
+current send eligibility. The bounded delivery path therefore re-reads the
+profile and applies consent, health, reachability, blacklist, paid-TV, and
+suppression gates at the last responsible moment.
 
 ## Required core work before delivery V2
 
 1. Plugin-specific API token scopes and authenticated actor identity.
 2. Reliable sandbox cron exposure with observable schedule state.
 3. Transactional outbox claim/retry primitives or a trusted Worker service.
-4. Email API support for sender profile, reply-to, provider message ID,
-   compliance headers, and provider errors.
-5. Public response primitives for binary pixel, safe redirects, and HTML form
-   responses.
+4. Core email API support for sender profile, reply-to, provider message ID,
+   compliance headers, and provider errors, replacing the direct provider path.
+5. Core public response primitives for binary pixel, safe redirects, and HTML
+   form responses, replacing the site-owned wrappers.
 6. Consent source/product/legal decisions from the Growth Studio source spec.
 
-Until those are complete, `deliveryMode=disabled` is an architectural safety
-boundary rather than a UI preference.
+Until those are complete, `deliveryMode=disabled` remains the boundary for bulk
+journeys and outbox dispatch. The private per-recipient tracked-send route is a
+separate bounded primitive and never scans an audience.

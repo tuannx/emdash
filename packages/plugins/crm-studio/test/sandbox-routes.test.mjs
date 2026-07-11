@@ -9,10 +9,13 @@ const expectedRoutes = [
   "v1/bootstrap",
   "v1/config/file/load",
   "v1/config/file/status",
+  "v1/deliveries/send",
   "v1/metrics/ingest-batch",
+  "v1/metrics/materialize-tracking",
   "v1/profiles/upsert-batch",
   "v1/programs/evaluate",
   "v1/programs/upsert",
+  "v1/providers/cloudflare/report-sync",
   "v1/segments/upsert",
   "v1/segments/list",
   "v1/segments/members/add",
@@ -23,10 +26,14 @@ const expectedRoutes = [
   "v1/migrations/emdash-users/step",
   "v1/migrations/emdash-users/status",
   "v1/templates/upsert",
+  "v1/tracking/click",
+  "v1/tracking/open",
+  "v1/tracking/unsubscribe",
 ];
+const publicRoutes = new Set(["v1/tracking/click", "v1/tracking/open", "v1/tracking/unsubscribe"]);
 for (const route of expectedRoutes) {
   assert.equal(typeof sandbox.routes[route]?.handler, "function", route + " handler must exist");
-  assert.notEqual(sandbox.routes[route]?.public, true, route + " must remain private");
+  assert.equal(sandbox.routes[route]?.public === true, publicRoutes.has(route), route + " visibility must match contract");
 }
 assert.deepEqual(Object.keys(sandbox.routes).sort(), expectedRoutes.slice().sort(), "sandbox route surface must be exact");
 
@@ -34,8 +41,9 @@ const descriptor = crmStudioPlugin();
 assert.equal(descriptor.id, "crm-studio");
 assert.equal(descriptor.format, "standard");
 assert.equal(descriptor.entrypoint, "@aikit/crm-studio/sandbox");
-assert.deepEqual(descriptor.capabilities, ["users:read"]);
+assert.deepEqual(descriptor.capabilities, ["users:read", "network:fetch"]);
 assert.equal(descriptor.capabilities.includes("email:send"), false, "V1 delivery must remain disabled by capability");
+assert.deepEqual(descriptor.allowedHosts, ["api.cloudflare.com"]);
 assert.ok(descriptor.storage.profiles);
 assert.ok(descriptor.storage.segmentMembershipStates);
 assert.ok(descriptor.storage.ingestRequests);
@@ -44,8 +52,12 @@ assert.ok(descriptor.storage.messageTemplates);
 assert.ok(descriptor.storage.configRevisions);
 assert.ok(descriptor.storage.metricFacts);
 assert.ok(descriptor.storage.scoreRuns);
+assert.ok(descriptor.storage.emailDeliveries);
+assert.ok(descriptor.storage.trackingLinks);
+assert.ok(descriptor.storage.trackingEvents);
 assert.ok(descriptor.adminPages.some((page) => page.path === "/statistics"));
 assert.ok(descriptor.adminPages.some((page) => page.path === "/configuration"));
+assert.ok(descriptor.adminPages.some((page) => page.path === "/tracking"));
 
 const users = [];
 for (let index = 0; index < 105; index++) {
@@ -177,6 +189,13 @@ const adminStatisticsPage = await sandbox.routes.admin.handler(
 );
 const adminStatisticsValidation = validateBlocks(adminStatisticsPage.blocks);
 assert.equal(adminStatisticsValidation.valid, true, JSON.stringify(adminStatisticsValidation.errors));
+const adminTrackingPage = await sandbox.routes.admin.handler(
+  routeContext("POST", { type: "page_load", page: "/tracking" }),
+  adminConfigCtx,
+);
+const adminTrackingValidation = validateBlocks(adminTrackingPage.blocks);
+assert.equal(adminTrackingValidation.valid, true, JSON.stringify(adminTrackingValidation.errors));
+assert.equal(JSON.stringify(adminTrackingPage.blocks).includes("Open used for scoring"), true);
 
 const firstMigrationBody = mutationInput("migration-0001", { restart: true, limit: 30 });
 const firstMigration = await invoke("v1/migrations/emdash-users/step", "POST", firstMigrationBody);

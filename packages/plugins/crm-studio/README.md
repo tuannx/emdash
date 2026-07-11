@@ -30,12 +30,14 @@ audience bounded context described by the Growth Studio specification.
 - Ingests aggregate-only measurement facts in append-only correction streams
   and creates immutable, input-fingerprinted score runs by program period.
 - Renders Block Kit admin pages for profiles, segments, programs, templates,
-  measurement, operational statistics, file configuration, migration, events,
-  and API integration.
+  measurement, email tracking, operational statistics, file configuration,
+  migration, events, and API integration.
 
-Live campaign delivery and tracking are not part of V1. `deliveryMode` is
-bootstrapped to `disabled`, every program/template has
-`delivery_enabled: false`, and the plugin does not request `email:send`.
+Bulk journeys remain disabled. CRM Studio exposes an explicit, private,
+per-recipient tracked-send route backed by Cloudflare Email Service REST; it
+does not request EmDash `email:send`. Every send re-checks profile eligibility,
+audience membership, suppressions, CRM blacklist, paid-TV exclusions, and
+active program/template state before contacting the provider.
 
 ## Safety invariants
 
@@ -73,7 +75,13 @@ bootstrapped to `disabled`, every program/template has
    receipt/checkpoint write fails. EmDash storage still has no cross-isolate
    compare-and-swap or multi-collection transaction; integrations must use one
    sequenced writer across shared request IDs and for each identity, segment,
-   template, program, and metric fact stream.
+    template, program, and metric fact stream.
+12. Tracking URLs use random 192-bit opaque tokens. Destinations remain in
+    plugin storage and the click wrapper only redirects to validated HTTPS
+    URLs. Invalid tokens return 404 without revealing delivery state.
+13. Open pixels are observations, not proof of a human read. Privacy proxies and
+    scanners are classified separately, and open counts never contribute to
+    performance scoring. Unique clicks and provider delivery status do.
 
 ## Growth measurement and scoring
 
@@ -107,8 +115,9 @@ to current configuration; repeating identical inputs returns the same run.
 
 Use the private routes `v1/templates/upsert`, `v1/programs/upsert`,
 `v1/metrics/ingest-batch` (maximum 16 facts), and `v1/programs/evaluate`, or
-the **Templates**, **Programs**, and **Measurement** admin pages. Scoring does
-not send messages or prove provider-side tracking.
+the **Templates**, **Programs**, and **Measurement** admin pages. Scoring itself
+does not send messages; tracked delivery and provider reconciliation are
+separate, explicit operations.
 
 ## File configuration and operational statistics
 
@@ -133,6 +142,34 @@ evaluation cannot double-count a program period.
 
 The same surfaces are available through `GET v1/config/file/status`,
 `POST v1/config/file/load`, and `GET v1/statistics/summary`.
+
+## Email tracking and Cloudflare reporting
+
+`POST v1/deliveries/send` rewrites up to 20 HTTPS links to
+`/crm-track/c/<opaque-token>`, appends a transparent
+`/crm-track/o/<opaque-token>.gif`, and adds one-click unsubscribe plus
+`X-CRM-Delivery-ID` and `X-CRM-Program-ID` headers. The raw Astro wrappers return
+a real 302, 1x1 GIF, or RFC 8058-compatible unsubscribe response; public plugin
+routes retain the isolated storage logic behind them.
+
+`POST v1/providers/cloudflare/report-sync` reads Cloudflare's
+`emailSendingAdaptive` GraphQL dataset. Because the current dataset does not
+return custom X-headers, correlation is deliberately fail-closed: recipient,
+exact subject, and send time must identify exactly one final provider event.
+Ambiguous rows are reported and never attributed. Cloudflare retains these
+Email Service analytics for 31 days.
+
+`POST v1/metrics/materialize-tracking` converts provider-delivered, unique-click,
+and one-click-unsubscribe counts into an append-only `crm_tracking` metric fact.
+Conversions and complaints remain zero until a separately verified source
+provides them. Open observations are displayed under **Email Tracking** but are
+excluded from scoring.
+
+Cloudflare credentials are read from plugin-scoped KV keys
+`settings:cloudflareAccountId`, `settings:cloudflareZoneId`,
+`settings:cloudflareApiToken`, `settings:cloudflareFromAddress`, and
+`settings:trackingBaseUrl`. Provision the API token through the trusted
+deployment secret workflow; CRM Studio never displays or returns it.
 
 ## Installation
 
@@ -195,20 +232,21 @@ without touching runtime history:
 
 ## Platform boundaries
 
-EmDash 0.16.1 sandbox plugins cannot yet implement the full delivery and
-tracking portion of the source specification safely:
+EmDash 0.16.1 still cannot implement autonomous bulk journeys safely:
 
 - the Cloudflare wrapper does not expose reliable scheduled cron execution;
 - plugin email send does not return provider IDs or support all required
-  sender/reply-to/compliance headers;
-- plugin API routes always return JSON, so they cannot serve a raw open pixel,
-  redirect click tracking, or an unsubscribe HTML form;
+  sender/reply-to/compliance headers, so the bounded send path uses Cloudflare
+  Email Service REST directly;
+- plugin API routes always return JSON, so site-owned Astro wrappers provide
+  the raw pixel, redirect, and unsubscribe responses;
 - storage batch writes are not transactional across collections;
 - plugin storage has no cross-isolate compare-and-swap primitive;
 - route context does not expose the authenticated actor identity for audit.
 
-Journeys, outbox dispatch, tracking, and unsubscribe must remain disabled until
-those core capabilities or a trusted external Worker are designed and tested.
+Journeys and outbox dispatch remain disabled until those core capabilities or a
+trusted queue Worker are designed and tested. Per-recipient tracked send is the
+only enabled delivery primitive.
 
 ## Documentation
 

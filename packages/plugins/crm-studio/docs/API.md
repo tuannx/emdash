@@ -71,6 +71,43 @@ into sequenced requests.
 
 ## Routes
 
+### Send one tracked email
+
+`POST v1/deliveries/send` uses the mutation envelope plus `program_key`,
+`profile_id`, and `period_key`. It is private and idempotent. The route refuses
+inactive configuration, ineligible profiles, nonmembers, suppressions,
+blacklist members, and paid-TV exclusions. It rewrites HTTPS links to opaque
+tokens, adds a 1x1 open pixel and one-click unsubscribe, then calls Cloudflare
+Email Service REST. The API token is never returned.
+
+### Public tracking collectors
+
+The plugin routes `GET v1/tracking/open`, `GET v1/tracking/click`, and
+`GET|POST v1/tracking/unsubscribe` are public because email clients cannot
+authenticate. They accept only a 48-character random hexadecimal token. Site
+wrappers expose the real response formats at `/crm-track/o/<token>.gif`,
+`/crm-track/c/<token>`, and `/crm-track/u/<token>`.
+
+Open events are diagnostic observations only. User-agent classes are reduced
+to `human_candidate`, `proxy_or_bot`, or `unknown`; raw IP and user-agent values
+are not stored. Click targets are server-side and must remain HTTPS.
+
+### Sync Cloudflare delivery report
+
+`POST v1/providers/cloudflare/report-sync` takes `program_key` and `period_key`.
+It queries at most 500 Email Service events and 25 recent CRM deliveries within
+Cloudflare's 31-day retention. A provider row is attached only when recipient,
+exact subject, and send time produce one unique match. Ambiguous/unmatched rows
+remain unattributed and are returned as counts.
+
+### Materialize tracking metrics
+
+`POST v1/metrics/materialize-tracking` creates the next immutable correction in
+the program-period `crm_tracking` stream. Sent/delivered counts come from
+provider states, clicks are unique per delivery, and unsubscribe is unique per
+profile. Opens never affect scoring. The bounded operation refuses more than
+100 deliveries or unsubscribe events instead of silently truncating.
+
 ### Inspect and load file configuration
 
 `GET v1/config/file/status` returns the bundled configuration version,
@@ -372,9 +409,9 @@ Every accepted fact pins the current program/template revision IDs and the
 audience/safety evidence fingerprints. If configuration or membership evidence
 changes, start a new opaque fact stream rather than correcting the old stream.
 
-These counts are supplied by an external aggregate measurement source. CRM
-Studio V1 does not send messages, collect provider events, or independently
-prove attribution/tracking.
+These counts may be supplied by an external aggregate measurement source or by
+the bounded CRM tracking materializer. Conversion attribution and complaints
+still require a separately verified source.
 
 ### Evaluate a program period
 
@@ -526,8 +563,8 @@ POST v1/segments/preview
 { "segment_key": "churned_users", "limit": 20 }
 ```
 
-Dynamic generations are point-in-time snapshots. V1 has no delivery consumer;
-any future sender must re-check live consent, reachability, health, and
+Dynamic generations are point-in-time snapshots. The bounded delivery consumer
+and any future sender must re-check live consent, reachability, health, and
 suppression state at send time rather than treating membership as permission.
 
 ## Important V1 limitation

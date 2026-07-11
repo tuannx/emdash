@@ -1,4 +1,4 @@
-import type { Block, BlockInteraction, BlockResponse, TableBlock } from "@emdash-cms/blocks/server";
+import type { Block, BlockInteraction, BlockResponse, FormBlock, TableBlock } from "@emdash-cms/blocks/server";
 import type { CrmContext, CrmEvent, CrmSegment, JsonRecord } from "../types.js";
 import { eventId, requestPayloadFingerprint } from "../domain/membership.js";
 import {
@@ -791,6 +791,126 @@ async function buildConfiguration(ctx: CrmContext): Promise<BlockResponse> {
   };
 }
 
+async function buildTracking(ctx: CrmContext): Promise<BlockResponse> {
+  var deliveries = await ctx.storage.emailDeliveries.query({ orderBy: { created_at: "desc" }, limit: 20 });
+  var events = await ctx.storage.trackingEvents.query({ orderBy: { occurred_at: "desc" }, limit: 100 });
+  var delivered = 0;
+  var queued = 0;
+  var bounced = 0;
+  var failed = 0;
+  var uniqueOpened = 0;
+  var uniqueClicked = 0;
+  var rows: Array<Record<string, unknown>> = [];
+  for (var index = 0; index < deliveries.items.length; index++) {
+    var delivery = deliveries.items[index].data;
+    if (delivery.provider_status === "delivered") delivered += 1;
+    if (delivery.provider_status === "queued") queued += 1;
+    if (delivery.provider_status === "permanent_bounce") bounced += 1;
+    if (delivery.provider_status === "failed") failed += 1;
+    if (delivery.unique_opened_at) uniqueOpened += 1;
+    if (delivery.unique_clicked_at) uniqueClicked += 1;
+    rows.push({
+      program: delivery.program_key,
+      period: delivery.period_key,
+      profile: delivery.profile_id,
+      provider: delivery.provider_status,
+      opened: delivery.unique_opened_at ? "observed" : "—",
+      clicked: delivery.unique_clicked_at ? "yes" : "—",
+      confidence: delivery.provider_match_confidence || "—",
+      sent_at: delivery.sent_at || delivery.created_at
+    });
+  }
+  var clickEvents = 0;
+  var proxyOpens = 0;
+  var unsubscribeEvents = 0;
+  for (var eventIndex = 0; eventIndex < events.items.length; eventIndex++) {
+    var event = events.items[eventIndex].data;
+    if (event.event_type === "click") clickEvents += 1;
+    if (event.event_type === "open_observed" && event.user_agent_class === "proxy_or_bot") proxyOpens += 1;
+    if (event.event_type === "unsubscribe") unsubscribeEvents += 1;
+  }
+  var accountId = await ctx.kv.get<string>("settings:cloudflareAccountId");
+  var zoneId = await ctx.kv.get<string>("settings:cloudflareZoneId");
+  var apiToken = await ctx.kv.get<string>("settings:cloudflareApiToken");
+  var fromAddress = await ctx.kv.get<string>("settings:cloudflareFromAddress");
+  var trackingBaseUrl = await ctx.kv.get<string>("settings:trackingBaseUrl");
+  var configured = Boolean(accountId && zoneId && apiToken && fromAddress && trackingBaseUrl);
+  var configForm: FormBlock = {
+    type: "form",
+    block_id: "tracking_provider_config_form",
+    fields: [
+      { type: "text_input", action_id: "cloudflare_account_id", label: "Cloudflare account ID", initial_value: accountId || "" },
+      { type: "text_input", action_id: "cloudflare_zone_id", label: "Cloudflare zone ID", initial_value: zoneId || "" },
+      { type: "text_input", action_id: "cloudflare_from_address", label: "Verified from address", initial_value: fromAddress || "", placeholder: "news@example.com" },
+      { type: "text_input", action_id: "tracking_base_url", label: "HTTPS tracking origin", initial_value: trackingBaseUrl || "", placeholder: "https://example.com" }
+    ],
+    submit: { label: "Save public provider config", action_id: "save_tracking_provider_config" }
+  };
+  var table: TableBlock = {
+    type: "table",
+    block_id: "tracking_deliveries_table",
+    columns: [
+      { key: "program", label: "Program", format: "code" },
+      { key: "period", label: "Period", format: "code" },
+      { key: "profile", label: "Profile", format: "code" },
+      { key: "provider", label: "Provider", format: "badge" },
+      { key: "opened", label: "Open", format: "badge" },
+      { key: "clicked", label: "Click", format: "badge" },
+      { key: "confidence", label: "Report match", format: "badge" },
+      { key: "sent_at", label: "Sent", format: "relative_time" }
+    ],
+    rows: rows,
+    page_action_id: "tracking_deliveries_page",
+    empty_text: "No tracked deliveries yet."
+  };
+  return {
+    blocks: [
+      { type: "header", text: "Email Tracking & Cloudflare Reports" },
+      {
+        type: "banner",
+        title: configured ? "Cloudflare Email Service configured" : "Provider configuration incomplete",
+        description: "Opaque server-side links hide destinations, the 1x1 GIF records open observations, and Cloudflare delivery reports are matched fail-closed by recipient, exact subject, and send time. Open pixels are never treated as proof of a human read because privacy proxies can preload images.",
+        variant: configured ? "default" : "alert"
+      },
+      {
+        type: "stats",
+        items: [
+          { label: "Recent deliveries", value: deliveries.items.length },
+          { label: "Delivered", value: delivered },
+          { label: "Queued", value: queued },
+          { label: "Bounced", value: bounced },
+          { label: "Failed", value: failed },
+          { label: "Unique clicks", value: uniqueClicked }
+        ]
+      },
+      {
+        type: "fields",
+        fields: [
+          { label: "Unique opens observed", value: String(uniqueOpened) },
+          { label: "Proxy/bot open observations", value: String(proxyOpens) },
+          { label: "Click observations", value: String(clickEvents) },
+          { label: "Unsubscribes", value: String(unsubscribeEvents) },
+          { label: "Open used for scoring", value: "No — diagnostic only" },
+          { label: "Click used for scoring", value: "Yes — unique delivery click" },
+          { label: "Cloudflare retention", value: "31 days" },
+          { label: "Tracking origin", value: trackingBaseUrl || "not configured" }
+        ]
+      },
+      {
+        type: "banner",
+        title: apiToken ? "Cloudflare API token is provisioned" : "Cloudflare API token is missing",
+        description: "The token is intentionally not accepted or displayed by this Block Kit form. Provision settings:cloudflareApiToken through the trusted deployment secret workflow.",
+        variant: apiToken ? "default" : "alert"
+      },
+      configForm,
+      { type: "divider" },
+      { type: "header", text: "Recent tracked deliveries" },
+      table,
+      { type: "actions", elements: [{ type: "button", label: "Refresh tracking", action_id: "refresh_tracking", style: "secondary" }] }
+    ]
+  };
+}
+
 async function buildEvents(ctx: CrmContext): Promise<BlockResponse> {
   var result = await ctx.storage.events.query({
     limit: READ_PAGE_LIMIT,
@@ -879,8 +999,8 @@ function buildSettings(): BlockResponse {
       { type: "header", text: "CRM API Integration" },
       {
         type: "banner",
-        title: "All V1 routes are private",
-        description: "Use an EmDash admin session or PAT with admin scope. No CRM write route is exposed with public:true.",
+        title: "Mutations remain private",
+        description: "Use an EmDash admin session or PAT with admin scope. Only opaque open, click, and one-click-unsubscribe collectors are public; they expose neither profile data nor destination URLs in their paths.",
         variant: "default"
       },
       {
@@ -900,11 +1020,14 @@ function buildSettings(): BlockResponse {
           { label: "Template upsert", value: "POST v1/templates/upsert" },
           { label: "Program upsert", value: "POST v1/programs/upsert" },
           { label: "Metric facts", value: "POST v1/metrics/ingest-batch" },
+          { label: "Tracked send", value: "POST v1/deliveries/send" },
+          { label: "Tracking metrics", value: "POST v1/metrics/materialize-tracking" },
+          { label: "Cloudflare report", value: "POST v1/providers/cloudflare/report-sync" },
           { label: "Score evaluation", value: "POST v1/programs/evaluate" },
           { label: "Statistics", value: "GET v1/statistics/summary" },
           { label: "File config status", value: "GET v1/config/file/status" },
           { label: "Load file config", value: "POST v1/config/file/load" },
-          { label: "Delivery mode", value: "disabled" }
+          { label: "Delivery mode", value: "explicit per-recipient API only" }
         ]
       },
       { type: "code", code: apiExample, language: "bash" }
@@ -1028,6 +1151,28 @@ async function handleTemplateForm(ctx: CrmContext, values: Record<string, unknow
   return error ? toast(error, "error", blocks) : toast("Template saved and scored", "success", blocks);
 }
 
+async function handleTrackingProviderConfig(ctx: CrmContext, values: Record<string, unknown>): Promise<BlockResponse> {
+  var accountId = typeof values.cloudflare_account_id === "string" ? values.cloudflare_account_id.trim() : "";
+  var zoneId = typeof values.cloudflare_zone_id === "string" ? values.cloudflare_zone_id.trim() : "";
+  var fromAddress = typeof values.cloudflare_from_address === "string" ? values.cloudflare_from_address.trim().toLowerCase() : "";
+  var baseUrl = typeof values.tracking_base_url === "string" ? values.tracking_base_url.trim() : "";
+  if (!/^[a-fA-F0-9]{32}$/.test(accountId)) return toast("Cloudflare account ID must be 32 hexadecimal characters", "error", (await buildTracking(ctx)).blocks);
+  if (!/^[a-fA-F0-9]{32}$/.test(zoneId)) return toast("Cloudflare zone ID must be 32 hexadecimal characters", "error", (await buildTracking(ctx)).blocks);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fromAddress)) return toast("Verified from address is invalid", "error", (await buildTracking(ctx)).blocks);
+  try {
+    var parsed = new URL(baseUrl);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== "/") throw new Error("invalid");
+    baseUrl = parsed.origin;
+  } catch (_error) {
+    return toast("Tracking origin must be an HTTPS origin without path, query, credentials, or fragment", "error", (await buildTracking(ctx)).blocks);
+  }
+  await ctx.kv.set("settings:cloudflareAccountId", accountId.toLowerCase());
+  await ctx.kv.set("settings:cloudflareZoneId", zoneId.toLowerCase());
+  await ctx.kv.set("settings:cloudflareFromAddress", fromAddress);
+  await ctx.kv.set("settings:trackingBaseUrl", baseUrl);
+  return toast("Cloudflare public configuration saved; API token state was not changed", "success", (await buildTracking(ctx)).blocks);
+}
+
 async function handleProgramForm(ctx: CrmContext, values: Record<string, unknown>): Promise<BlockResponse> {
   var measurement: JsonRecord = {
     primary_metric: values.primary_metric,
@@ -1123,6 +1268,7 @@ export async function handleAdmin(input: unknown, ctx: CrmContext): Promise<Bloc
     if (interaction.page === "/programs") return await buildPrograms(ctx);
     if (interaction.page === "/templates") return await buildTemplates(ctx);
     if (interaction.page === "/measurement") return await buildMeasurement(ctx);
+    if (interaction.page === "/tracking") return await buildTracking(ctx);
     if (interaction.page === "/statistics") return await buildStatistics(ctx);
     if (interaction.page === "/configuration") return await buildConfiguration(ctx);
     if (interaction.page === "/events") return await buildEvents(ctx);
@@ -1134,6 +1280,7 @@ export async function handleAdmin(input: unknown, ctx: CrmContext): Promise<Bloc
   if (interaction.type === "block_action") {
     if (interaction.action_id === "refresh_dashboard") return await buildDashboard(ctx);
     if (interaction.action_id === "refresh_statistics") return await buildStatistics(ctx);
+    if (interaction.action_id === "refresh_tracking") return await buildTracking(ctx);
     if (interaction.action_id === "refresh_file_config") return await buildConfiguration(ctx);
     if (interaction.action_id === "load_file_config") {
       var configTimestamp = new Date().toISOString();
@@ -1223,6 +1370,11 @@ export async function handleAdmin(input: unknown, ctx: CrmContext): Promise<Bloc
     if (interaction.action_id === "save_template") {
       return await serializeMutation(async function() {
         return await handleTemplateForm(ctx, formValues);
+      });
+    }
+    if (interaction.action_id === "save_tracking_provider_config") {
+      return await serializeMutation(async function() {
+        return await handleTrackingProviderConfig(ctx, formValues);
       });
     }
     if (interaction.action_id === "save_program") {

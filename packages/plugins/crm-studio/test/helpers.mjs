@@ -112,6 +112,9 @@ export function createCtx(users = []) {
     configRevisions: createCollection(),
     metricFacts: createCollection(),
     scoreRuns: createCollection(),
+    emailDeliveries: createCollection(),
+    trackingLinks: createCollection(),
+    trackingEvents: createCollection(),
   };
   const userItems = users;
   return {

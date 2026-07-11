@@ -253,6 +253,62 @@ export interface ScoreRun extends JsonRecord {
   created_at: string;
 }
 
+export interface EmailDelivery extends JsonRecord {
+  id: string;
+  schema_version: number;
+  delivery_key: string;
+  program_key: string;
+  period_key: string;
+  profile_id: string;
+  template_key: string;
+  provider: "cloudflare_email_service";
+  provider_status: "prepared" | "delivered" | "queued" | "permanent_bounce" | "failed";
+  recipient_hash: string;
+  subject_fingerprint: string;
+  open_token: string;
+  unique_opened_at: string | null;
+  unique_clicked_at: string | null;
+  open_observations: number;
+  click_observations: number;
+  provider_error_code: string | null;
+  provider_error_message: string | null;
+  provider_message_id: string | null;
+  provider_reported_at: string | null;
+  provider_match_confidence: "immediate" | "exact_recipient_subject_time" | null;
+  sent_at: string | null;
+  request_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TrackingLink extends JsonRecord {
+  id: string;
+  schema_version: number;
+  token: string;
+  delivery_key: string;
+  program_key: string;
+  period_key: string;
+  profile_id: string;
+  target_url: string;
+  target_fingerprint: string;
+  created_at: string;
+}
+
+export interface TrackingEvent extends JsonRecord {
+  id: string;
+  schema_version: number;
+  event_type: "open_observed" | "click" | "unsubscribe" | "provider_delivery";
+  delivery_key: string;
+  program_key: string;
+  period_key: string;
+  profile_id: string;
+  token: string | null;
+  occurred_at: string;
+  request_fingerprint: string;
+  user_agent_class: "human_candidate" | "proxy_or_bot" | "unknown";
+  metadata: JsonRecord;
+}
+
 export interface CrmCollections {
   profiles: StorageCollection<CrmProfile>;
   segments: StorageCollection<CrmSegment>;
@@ -266,6 +322,9 @@ export interface CrmCollections {
   configRevisions: StorageCollection<ConfigRevision>;
   metricFacts: StorageCollection<MetricFact>;
   scoreRuns: StorageCollection<ScoreRun>;
+  emailDeliveries: StorageCollection<EmailDelivery>;
+  trackingLinks: StorageCollection<TrackingLink>;
+  trackingEvents: StorageCollection<TrackingEvent>;
 }
 
 export interface CrmContext {
@@ -283,6 +342,9 @@ export interface CrmContext {
       items: EmDashUser[];
       nextCursor?: string;
     }>;
+  };
+  http?: {
+    fetch(url: string, init?: RequestInit): Promise<Response>;
   };
 }
 

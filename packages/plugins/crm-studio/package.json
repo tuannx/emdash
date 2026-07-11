@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "build": "tsc && tsdown src/sandbox-entry.ts --format esm --platform browser --target es2022 --out-dir dist --no-clean --sourcemap && cp dist/sandbox-entry.js dist/sandbox.mjs",
-    "test": "npm run build && node test/domain.test.mjs && node test/file-config.test.mjs && node test/scoring.test.mjs && node test/statistics.test.mjs && node test/sandbox-routes.test.mjs && node test/growth-routes.test.mjs && node test/sandbox-bundle.test.mjs"
+    "test": "npm run build && node test/domain.test.mjs && node test/file-config.test.mjs && node test/scoring.test.mjs && node test/statistics.test.mjs && node test/tracking.test.mjs && node test/sandbox-routes.test.mjs && node test/growth-routes.test.mjs && node test/sandbox-bundle.test.mjs"
   },
   "keywords": [
     "emdash",

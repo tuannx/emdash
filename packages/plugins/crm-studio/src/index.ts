@@ -12,7 +12,8 @@ export function crmStudioPlugin(): PluginDescriptor {
     version: "0.1.0",
     format: "standard",
     entrypoint: "@aikit/crm-studio/sandbox",
-    capabilities: ["users:read"],
+    capabilities: ["users:read", "network:fetch"],
+    allowedHosts: ["api.cloudflare.com"],
     storage: {
       profiles: {
         indexes: [
@@ -67,6 +68,17 @@ export function crmStudioPlugin(): PluginDescriptor {
       },
       scoreRuns: {
         indexes: ["program_key", "period_key", "status", "formula_version", "input_facts_fingerprint", "created_at"]
+      },
+      emailDeliveries: {
+        indexes: ["delivery_key", "program_key", "period_key", "profile_id", "provider_status", "created_at"],
+        uniqueIndexes: ["delivery_key", "open_token"]
+      },
+      trackingLinks: {
+        indexes: ["token", "delivery_key", "program_key", "period_key", "created_at"],
+        uniqueIndexes: ["token"]
+      },
+      trackingEvents: {
+        indexes: ["event_type", "delivery_key", "program_key", "period_key", "occurred_at", "request_fingerprint"]
       }
     },
     adminPages: [
@@ -76,6 +88,7 @@ export function crmStudioPlugin(): PluginDescriptor {
       { path: "/programs", label: "Programs", icon: "target" },
       { path: "/templates", label: "Templates", icon: "file-text" },
       { path: "/measurement", label: "Measurement", icon: "bar-chart" },
+      { path: "/tracking", label: "Email Tracking", icon: "mouse-pointer" },
       { path: "/statistics", label: "Statistics", icon: "trending-up" },
       { path: "/configuration", label: "Configuration", icon: "sliders" },
       { path: "/events", label: "Events", icon: "activity" },
