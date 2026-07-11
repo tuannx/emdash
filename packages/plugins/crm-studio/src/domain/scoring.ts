@@ -1,4 +1,5 @@
 import type { JsonRecord } from "../types.js";
+import { CRM_STUDIO_FILE_CONFIG } from "../config/file-config.js";
 
 export type ScoreGrade = "Excellent" | "Strong" | "Fair" | "Weak" | "Critical" | "Blocked" | "Unsafe" | "Insufficient data" | "Invalid data";
 export type ScoreConfidence = "high" | "medium" | "low" | "insufficient" | "none";
@@ -72,10 +73,11 @@ function roundScore(value: number): number {
 }
 
 function gradeForScore(score: number): ScoreGrade {
-  if (score >= 90) return "Excellent";
-  if (score >= 75) return "Strong";
-  if (score >= 60) return "Fair";
-  if (score >= 40) return "Weak";
+  var bands = CRM_STUDIO_FILE_CONFIG.grade_bands;
+  if (score >= bands.excellent) return "Excellent";
+  if (score >= bands.strong) return "Strong";
+  if (score >= bands.fair) return "Fair";
+  if (score >= bands.weak) return "Weak";
   return "Critical";
 }
 
@@ -83,8 +85,8 @@ function statusForDimension(score: number, maximum: number, blocked: boolean): S
   if (blocked) return "blocked";
   if (maximum <= 0) return "fail";
   var ratio = score / maximum;
-  if (ratio >= 0.85) return "pass";
-  if (ratio >= 0.5) return "warn";
+  if (ratio >= CRM_STUDIO_FILE_CONFIG.dimension_status.pass_ratio) return "pass";
+  if (ratio >= CRM_STUDIO_FILE_CONFIG.dimension_status.warn_ratio) return "warn";
   return "fail";
 }
 
@@ -240,6 +242,7 @@ function confidenceNumber(confidence: ScoreConfidence): number {
 }
 
 export function scoreProgramReadiness(definitionInput: unknown, contextInput?: unknown): ScoreResult {
+  var readinessConfig = CRM_STUDIO_FILE_CONFIG.readiness;
   var definition = asRecord(definitionInput) || {};
   var context = asRecord(contextInput);
   var audience = asRecord(definition.audience);
@@ -256,7 +259,7 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
   var offerType = findNestedString(definition, ["offer_type", "program_type"]);
   var paidTvRequired = offerType === "discount" || offerType === "acquisition";
 
-  if (consentGate) safetyScore += 12;
+  if (consentGate) safetyScore += readinessConfig.consent_weight;
   else {
     blockers.push("PROGRAM_CONSENT_GATE_MISSING");
     addHint(
@@ -268,7 +271,7 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
       "Require marketing_consent = granted in the audience rule or set safety.require_marketing_consent to true."
     );
   }
-  if (contactSafetyExcluded) safetyScore += 9;
+  if (contactSafetyExcluded) safetyScore += readinessConfig.contact_safety_weight;
   else {
     blockers.push("PROGRAM_CONTACT_SAFETY_EXCLUSION_MISSING");
     addHint(
@@ -280,7 +283,7 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
       "Add crm_contact_safety to safety.excluded_segments before activation."
     );
   }
-  if (blacklistExcluded) safetyScore += 9;
+  if (blacklistExcluded) safetyScore += readinessConfig.blacklist_weight;
   else {
     blockers.push("PROGRAM_BLACKLIST_EXCLUSION_MISSING");
     addHint(
@@ -307,16 +310,16 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
     key: "safety",
     label: "Audience safety",
     score: safetyScore,
-    max_score: 30,
-    status: statusForDimension(safetyScore, 30, safetyScore < 30 || (paidTvRequired && !paidTvExcluded)),
-    detail: safetyScore === 30 && (!paidTvRequired || paidTvExcluded) ? "Consent and required safety exclusions are explicit." : "One or more mandatory audience protections are missing."
+    max_score: readinessConfig.safety_max,
+    status: statusForDimension(safetyScore, readinessConfig.safety_max, safetyScore < readinessConfig.safety_max || (paidTvRequired && !paidTvExcluded)),
+    detail: safetyScore === readinessConfig.safety_max && (!paidTvRequired || paidTvExcluded) ? "Consent and required safety exclusions are explicit." : "One or more mandatory audience protections are missing."
   });
 
   var segmentKey = findNestedString(audience, ["segment_key", "segment"]);
   if (!segmentKey) segmentKey = findNestedString(definition, ["segment_key", "audience_segment_key"]);
   var segmentExists = resolveSegmentExistence(segmentKey, audience, context);
   var audienceScore = 0;
-  if (segmentKey) audienceScore += 10;
+  if (segmentKey) audienceScore += readinessConfig.audience_key_weight;
   else {
     blockers.push("PROGRAM_SEGMENT_KEY_MISSING");
     addHint(
@@ -328,7 +331,7 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
       "Select a CRM Studio segment and persist its segment_key."
     );
   }
-  if (segmentExists === true) audienceScore += 15;
+  if (segmentExists === true) audienceScore += readinessConfig.audience_exists_weight;
   else if (segmentExists === false) {
     blockers.push("PROGRAM_SEGMENT_NOT_FOUND");
     addHint(
@@ -354,8 +357,8 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
     key: "audience",
     label: "Audience definition",
     score: audienceScore,
-    max_score: 25,
-    status: statusForDimension(audienceScore, 25, segmentExists !== true || !segmentKey),
+    max_score: readinessConfig.audience_max,
+    status: statusForDimension(audienceScore, readinessConfig.audience_max, segmentExists !== true || !segmentKey),
     detail: segmentExists === true && segmentKey ? "The referenced audience segment exists." : "The audience reference is missing or unverified."
   });
 
@@ -376,7 +379,7 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
       addHint(hints, "PROGRAM_TEMPLATE_INACTIVE", "blocker", "template", "The program template is not active configuration.", "Activate a safe template revision before marking the program ready.");
     }
     templateQuality = scoreTemplateQuality(inlineTemplate);
-    templateScore = Math.round(templateQuality.score * 0.25);
+    templateScore = Math.round(templateQuality.score * readinessConfig.template_max / 100);
     if (templateQuality.blockers.length > 0) {
       templateDimensionBlocked = true;
       blockers.push("PROGRAM_TEMPLATE_UNSAFE");
@@ -414,20 +417,20 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
         );
       }
     }
-    if (templateQuality.blockers.length === 0 && templateQuality.score < 75) {
+    if (templateQuality.blockers.length === 0 && templateQuality.score < CRM_STUDIO_FILE_CONFIG.activation_minimum_score) {
       addHint(
         hints,
         "PROGRAM_TEMPLATE_QUALITY_LOW",
         "medium",
         "template",
         "The inline template is incomplete or low quality.",
-        "Improve subject, body, CTA, personalization, and fallback coverage until template quality is at least 75."
+        "Improve subject, body, CTA, personalization, and fallback coverage until template quality is at least " + CRM_STUDIO_FILE_CONFIG.activation_minimum_score + "."
       );
     }
   } else if (templateExists === true) {
     var referencedQuality = resolveTemplateQualityScore(context);
     if (referencedQuality === null) {
-      templateScore = 12;
+      templateScore = Math.round(readinessConfig.template_max * 0.5);
       templateDimensionBlocked = true;
       blockers.push("PROGRAM_TEMPLATE_UNSCORED");
       addHint(
@@ -439,8 +442,8 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
         "Load the template definition, run scoreTemplateQuality, and pass template_quality_score."
       );
     } else {
-      templateScore = Math.round(referencedQuality * 0.25);
-      if (referencedQuality < 75) {
+      templateScore = Math.round(referencedQuality * readinessConfig.template_max / 100);
+      if (referencedQuality < CRM_STUDIO_FILE_CONFIG.activation_minimum_score) {
         templateDimensionBlocked = true;
         blockers.push("PROGRAM_TEMPLATE_NOT_READY");
         addHint(
@@ -448,7 +451,7 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
           "PROGRAM_TEMPLATE_QUALITY_LOW",
           "medium",
           "template",
-          "The referenced template quality score is below 75.",
+          "The referenced template quality score is below " + CRM_STUDIO_FILE_CONFIG.activation_minimum_score + ".",
           "Improve the template and rescore it before scheduling the program."
         );
       }
@@ -470,8 +473,8 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
     key: "template",
     label: "Message template",
     score: templateScore,
-    max_score: 25,
-    status: statusForDimension(templateScore, 25, templateDimensionBlocked),
+    max_score: readinessConfig.template_max,
+    status: statusForDimension(templateScore, readinessConfig.template_max, templateDimensionBlocked),
     detail: templateQuality ? "Inline template quality: " + templateQuality.score + "/100." : templateExists === true ? "Referenced template coverage is available." : "Template coverage is missing or unverified."
   });
 
@@ -483,25 +486,25 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
   var baselineValue = measurement ? asFiniteNumber(measurement.baseline_value) : null;
   var controlPercent = measurement ? asFiniteNumber(measurement.control_group_percentage) : null;
   var measurementBlocked = false;
-  if (primaryMetric) measurementScore += 6;
+  if (primaryMetric) measurementScore += readinessConfig.primary_metric_weight;
   else {
     measurementBlocked = true;
     blockers.push("PROGRAM_PRIMARY_METRIC_MISSING");
     addHint(hints, "PROGRAM_PRIMARY_METRIC_MISSING", "blocker", "measurement", "No primary success metric is defined.", "Set measurement.primary_metric to one business outcome.");
   }
-  if (conversionEvent) measurementScore += 5;
+  if (conversionEvent) measurementScore += readinessConfig.conversion_event_weight;
   else {
     measurementBlocked = true;
     blockers.push("PROGRAM_CONVERSION_EVENT_MISSING");
     addHint(hints, "PROGRAM_CONVERSION_EVENT_MISSING", "blocker", "measurement", "No attributable conversion event is defined.", "Set measurement.conversion_event to a stable event key.");
   }
-  if (attributionDays !== null && attributionDays > 0 && attributionDays <= 365) measurementScore += 4;
+  if (attributionDays !== null && attributionDays > 0 && attributionDays <= 365) measurementScore += readinessConfig.attribution_window_weight;
   else {
     measurementBlocked = true;
     blockers.push("PROGRAM_ATTRIBUTION_WINDOW_MISSING");
     addHint(hints, "PROGRAM_ATTRIBUTION_WINDOW_MISSING", "blocker", "measurement", "The attribution window is missing or invalid.", "Set attribution_window_days between 1 and 365.");
   }
-  if (targetValue !== null || baselineValue !== null || (controlPercent !== null && controlPercent > 0 && controlPercent < 100)) measurementScore += 5;
+  if (targetValue !== null || baselineValue !== null || (controlPercent !== null && controlPercent > 0 && controlPercent < 100)) measurementScore += readinessConfig.comparison_plan_weight;
   else {
     measurementBlocked = true;
     blockers.push("PROGRAM_COMPARISON_PLAN_MISSING");
@@ -511,13 +514,13 @@ export function scoreProgramReadiness(definitionInput: unknown, contextInput?: u
     key: "measurement",
     label: "Measurement plan",
     score: measurementScore,
-    max_score: 20,
-    status: statusForDimension(measurementScore, 20, measurementBlocked),
-    detail: measurementScore === 20 ? "Outcome, attribution, and comparison are defined." : "The measurement plan is incomplete."
+    max_score: readinessConfig.measurement_max,
+    status: statusForDimension(measurementScore, readinessConfig.measurement_max, measurementBlocked),
+    detail: measurementScore === readinessConfig.measurement_max ? "Outcome, attribution, and comparison are defined." : "The measurement plan is incomplete."
   });
 
   var total = safetyScore + audienceScore + templateScore + measurementScore;
-  if (blockers.length > 0) total = Math.min(total, 49);
+  if (blockers.length > 0) total = Math.min(total, CRM_STUDIO_FILE_CONFIG.blocker_score_cap);
   total = roundScore(total);
   var knownCoverage = 0;
   if (segmentExists !== null) knownCoverage++;
@@ -619,6 +622,7 @@ function isSafeCtaUrl(value: string): boolean {
 }
 
 export function scoreTemplateQuality(templateInput: unknown): ScoreResult {
+  var templateConfig = CRM_STUDIO_FILE_CONFIG.template_quality;
   var template = asRecord(templateInput) || {};
   var hints: ScoringHint[] = [];
   var blockers: string[] = [];
@@ -629,23 +633,23 @@ export function scoreTemplateQuality(templateInput: unknown): ScoreResult {
   var coverageScore = 0;
 
   if (subject) {
-    coverageScore += 10;
-    if (subject.length >= 20 && subject.length <= 65) coverageScore += 5;
+    coverageScore += templateConfig.subject_present_weight;
+    if (subject.length >= 20 && subject.length <= 65) coverageScore += templateConfig.subject_length_weight;
     else {
-      coverageScore += 2;
+      coverageScore += templateConfig.subject_length_partial_weight;
       addHint(hints, "TEMPLATE_SUBJECT_LENGTH", "low", "coverage", "The subject is outside the recommended 20 to 65 character range.", "Rewrite the subject to be specific and scannable in 20 to 65 characters.");
     }
   } else addHint(hints, "TEMPLATE_SUBJECT_MISSING", "high", "coverage", "The template has no subject.", "Add a concise subject line.");
 
   if (body) {
-    coverageScore += 15;
+    coverageScore += templateConfig.body_present_weight;
     var visibleBody = body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    if (visibleBody.length >= 80) coverageScore += 10;
+    if (visibleBody.length >= 80) coverageScore += templateConfig.body_complete_weight;
     else if (visibleBody.length >= 20) {
-      coverageScore += 5;
+      coverageScore += templateConfig.body_partial_weight;
       addHint(hints, "TEMPLATE_BODY_THIN", "medium", "coverage", "The message body has little explanatory content.", "Explain the value and next step in at least 80 visible characters.");
     } else {
-      coverageScore += 2;
+      coverageScore += templateConfig.body_thin_weight;
       addHint(hints, "TEMPLATE_BODY_THIN", "high", "coverage", "The message body is too short to communicate value safely.", "Add a clear value proposition and next step.");
     }
   } else addHint(hints, "TEMPLATE_BODY_MISSING", "high", "coverage", "The template has no message body.", "Add a complete message body.");
@@ -654,16 +658,16 @@ export function scoreTemplateQuality(templateInput: unknown): ScoreResult {
     key: "coverage",
     label: "Subject and body coverage",
     score: coverageScore,
-    max_score: 40,
-    status: statusForDimension(coverageScore, 40, false),
+    max_score: templateConfig.coverage_max,
+    status: statusForDimension(coverageScore, templateConfig.coverage_max, false),
     detail: subject && body ? "Subject and body are present." : "Required message content is missing."
   });
 
   var cta = resolveCta(template);
   var ctaScore = 0;
-  if (cta.label) ctaScore += 10;
+  if (cta.label) ctaScore += templateConfig.cta_label_weight;
   else addHint(hints, "TEMPLATE_CTA_LABEL_MISSING", "medium", "cta", "The call to action has no label.", "Add one concrete action label.");
-  if (cta.url && isSafeCtaUrl(cta.url)) ctaScore += 10;
+  if (cta.url && isSafeCtaUrl(cta.url)) ctaScore += templateConfig.cta_url_weight;
   else if (cta.url) {
     blockers.push("TEMPLATE_CTA_URL_UNSAFE");
     addHint(hints, "TEMPLATE_CTA_URL_UNSAFE", "blocker", "cta", "The CTA URL is not an HTTPS or safe relative URL.", "Use an HTTPS destination or a validated relative application path.");
@@ -672,33 +676,33 @@ export function scoreTemplateQuality(templateInput: unknown): ScoreResult {
     key: "cta",
     label: "Call to action",
     score: ctaScore,
-    max_score: 20,
-    status: statusForDimension(ctaScore, 20, cta.url !== null && !isSafeCtaUrl(cta.url)),
-    detail: ctaScore === 20 ? "CTA label and destination are complete." : "CTA coverage is incomplete or unsafe."
+    max_score: templateConfig.cta_max,
+    status: statusForDimension(ctaScore, templateConfig.cta_max, cta.url !== null && !isSafeCtaUrl(cta.url)),
+    detail: ctaScore === templateConfig.cta_max ? "CTA label and destination are complete." : "CTA coverage is incomplete or unsafe."
   });
 
   var combined = allTemplateStrings(template);
-  var personalizationScore = templateHasPersonalization(combined) ? 10 : 0;
+  var personalizationScore = templateHasPersonalization(combined) ? templateConfig.personalization_max : 0;
   if (personalizationScore === 0) addHint(hints, "TEMPLATE_PERSONALIZATION_MISSING", "low", "personalization", "No supported recipient-name token is present.", "Use {{first_name}}, {{name}}, {{display_name}}, or {{profile.name}} when a safe fallback is available.");
   dimensions.push({
     key: "personalization",
     label: "Personalization",
     score: personalizationScore,
-    max_score: 10,
-    status: statusForDimension(personalizationScore, 10, false),
-    detail: personalizationScore === 10 ? "A supported recipient-name token is present." : "No supported personalization token was found."
+    max_score: templateConfig.personalization_max,
+    status: statusForDimension(personalizationScore, templateConfig.personalization_max, false),
+    detail: personalizationScore === templateConfig.personalization_max ? "A supported recipient-name token is present." : "No supported personalization token was found."
   });
 
-  var safetyScore = combined.trim() ? 25 : 0;
+  var safetyScore = combined.trim() ? templateConfig.safety_max : 0;
   var activeContent = templateHasActiveContent(combined);
   var manualUnsubscribe = templateHasManualUnsubscribe(combined);
   if (activeContent) {
-    safetyScore -= 15;
+    safetyScore -= templateConfig.active_content_penalty;
     blockers.push("TEMPLATE_ACTIVE_CONTENT");
     addHint(hints, "TEMPLATE_ACTIVE_CONTENT", "blocker", "safety", "The template contains scriptable or embedded active content.", "Remove scripts, event handlers, JavaScript URLs, iframes, objects, and embeds.");
   }
   if (manualUnsubscribe) {
-    safetyScore -= 10;
+    safetyScore -= templateConfig.manual_unsubscribe_penalty;
     blockers.push("TEMPLATE_MANUAL_UNSUBSCRIBE");
     addHint(hints, "TEMPLATE_MANUAL_UNSUBSCRIBE", "blocker", "safety", "The template manually implements unsubscribe content.", "Remove the manual link and use the signed compliance footer from the trusted delivery layer.");
   }
@@ -706,26 +710,26 @@ export function scoreTemplateQuality(templateInput: unknown): ScoreResult {
     key: "safety",
     label: "Template safety",
     score: safetyScore,
-    max_score: 25,
-    status: statusForDimension(safetyScore, 25, activeContent || manualUnsubscribe),
-    detail: safetyScore === 25 ? "No active content or manual unsubscribe implementation was detected." : combined.trim() ? "Unsafe template constructs require removal." : "No content was available for a safety assessment."
+    max_score: templateConfig.safety_max,
+    status: statusForDimension(safetyScore, templateConfig.safety_max, activeContent || manualUnsubscribe),
+    detail: safetyScore === templateConfig.safety_max ? "No active content or manual unsubscribe implementation was detected." : combined.trim() ? "Unsafe template constructs require removal." : "No content was available for a safety assessment."
   });
 
   var fallbackScore = 0;
-  if (body && !templateHasHtml(body)) fallbackScore = 5;
-  else if (body && textBody) fallbackScore = 5;
+  if (body && !templateHasHtml(body)) fallbackScore = templateConfig.fallback_max;
+  else if (body && textBody) fallbackScore = templateConfig.fallback_max;
   else if (body) addHint(hints, "TEMPLATE_TEXT_FALLBACK_MISSING", "low", "fallback", "The HTML message has no plain-text fallback.", "Add body_text or plain_text for non-HTML clients.");
   dimensions.push({
     key: "fallback",
     label: "Plain-text fallback",
     score: fallbackScore,
-    max_score: 5,
-    status: statusForDimension(fallbackScore, 5, false),
-    detail: fallbackScore === 5 ? "Plain-text rendering is covered." : "A plain-text fallback is missing."
+    max_score: templateConfig.fallback_max,
+    status: statusForDimension(fallbackScore, templateConfig.fallback_max, false),
+    detail: fallbackScore === templateConfig.fallback_max ? "Plain-text rendering is covered." : "A plain-text fallback is missing."
   });
 
   var total = coverageScore + ctaScore + personalizationScore + safetyScore + fallbackScore;
-  if (blockers.length > 0) total = Math.min(total, 49);
+  if (blockers.length > 0) total = Math.min(total, CRM_STUDIO_FILE_CONFIG.blocker_score_cap);
   total = roundScore(total);
   var known = 0;
   if (subject) known++;
@@ -767,26 +771,32 @@ function lowerIsBetterScore(rate: number, target: number, failure: number, maxim
 
 function performanceConfidence(sample: number, minimum: number): ScoreConfidence {
   if (sample < minimum) return "insufficient";
-  if (sample >= minimum * 20) return "high";
-  if (sample >= minimum * 5) return "medium";
+  if (sample >= minimum * CRM_STUDIO_FILE_CONFIG.performance.high_confidence_multiplier) return "high";
+  if (sample >= minimum * CRM_STUDIO_FILE_CONFIG.performance.medium_confidence_multiplier) return "medium";
   return "low";
 }
 
 function emptyPerformanceDimensions(status: ScoreStatus): ScoringDimension[] {
+  var performanceConfig = CRM_STUDIO_FILE_CONFIG.performance;
   return [
-    { key: "delivery", label: "Delivery rate", score: null, max_score: 30, status: status, detail: "Not scored." },
-    { key: "click", label: "Click rate", score: null, max_score: 25, status: status, detail: "Not scored." },
-    { key: "conversion", label: "Conversion rate", score: null, max_score: 30, status: status, detail: "Not scored." },
-    { key: "safety", label: "Complaint and unsubscribe safety", score: null, max_score: 15, status: status, detail: "Not scored." }
+    { key: "delivery", label: "Delivery rate", score: null, max_score: performanceConfig.delivery.max_score, status: status, detail: "Not scored." },
+    { key: "click", label: "Click rate", score: null, max_score: performanceConfig.click.max_score, status: status, detail: "Not scored." },
+    { key: "conversion", label: "Conversion rate", score: null, max_score: performanceConfig.conversion.max_score, status: status, detail: "Not scored." },
+    { key: "safety", label: "Complaint and unsubscribe safety", score: null, max_score: performanceConfig.complaint.max_score + performanceConfig.unsubscribe.max_score, status: status, detail: "Not scored." }
   ];
 }
 
+function percentLabel(value: number): string {
+  return Math.round(value * 10000) / 100 + "%";
+}
+
 export function scoreProgramPerformance(metricsInput: unknown, optionsInput?: unknown): PerformanceScoreResult {
+  var performanceConfig = CRM_STUDIO_FILE_CONFIG.performance;
   var metrics = asRecord(metricsInput) || {};
   var options = asRecord(optionsInput);
   var configuredMinimum = options ? asFiniteNumber(options.minimum_sample_size) : null;
   if (configuredMinimum === null && options) configuredMinimum = asFiniteNumber(options.min_sample_size);
-  var minimum = configuredMinimum !== null && Number.isInteger(configuredMinimum) && configuredMinimum > 0 ? configuredMinimum : 100;
+  var minimum = configuredMinimum !== null && Number.isInteger(configuredMinimum) && configuredMinimum > 0 ? configuredMinimum : performanceConfig.default_minimum_sample_size;
   var sent = readCount(metrics, ["sent", "sent_count"]);
   var delivered = readCount(metrics, ["delivered", "delivered_count"]);
   var clicks = readCount(metrics, ["unique_clicks", "clicked", "clicks", "click_count"]);
@@ -868,28 +878,28 @@ export function scoreProgramPerformance(metricsInput: unknown, optionsInput?: un
     };
   }
 
-  var deliveryScore = scaledRate(deliveryRate, 0.8, 0.98, 30);
-  var clickScore = scaledRate(clickRate, 0.005, 0.08, 25);
-  var conversionScore = scaledRate(conversionRate, 0, 0.05, 30);
-  var complaintScore = lowerIsBetterScore(complaintRate, 0.001, 0.005, 8);
-  var unsubscribeScore = lowerIsBetterScore(unsubscribeRate, 0.005, 0.03, 7);
+  var deliveryScore = scaledRate(deliveryRate, performanceConfig.delivery.floor, performanceConfig.delivery.target, performanceConfig.delivery.max_score);
+  var clickScore = scaledRate(clickRate, performanceConfig.click.floor, performanceConfig.click.target, performanceConfig.click.max_score);
+  var conversionScore = scaledRate(conversionRate, performanceConfig.conversion.floor, performanceConfig.conversion.target, performanceConfig.conversion.max_score);
+  var complaintScore = lowerIsBetterScore(complaintRate, performanceConfig.complaint.target, performanceConfig.complaint.stop_at, performanceConfig.complaint.max_score);
+  var unsubscribeScore = lowerIsBetterScore(unsubscribeRate, performanceConfig.unsubscribe.target, performanceConfig.unsubscribe.stop_at, performanceConfig.unsubscribe.max_score);
   var safetyScore = complaintScore + unsubscribeScore;
 
-  if (deliveryRate < 0.95) addHint(hints, "PERFORMANCE_DELIVERY_LOW", "high", "delivery", "Delivery rate is below 95%.", "Review list hygiene, suppressions, and provider rejection reasons.");
-  if (clickRate < 0.02) addHint(hints, "PERFORMANCE_CLICK_LOW", "medium", "click", "Unique click rate is below 2% of delivered messages.", "Test message relevance, CTA clarity, and audience fit.");
-  if (conversionRate < 0.01) addHint(hints, "PERFORMANCE_CONVERSION_LOW", "medium", "conversion", "Attributed conversion rate is below 1% of delivered messages.", "Check offer alignment, landing flow, and attribution-event integrity.");
-  if (complaintRate > 0.001) addHint(hints, "PERFORMANCE_COMPLAINT_HIGH", "high", "safety", "Complaint rate is above 0.1%.", "Pause expansion, inspect consent evidence, and narrow the audience before resuming.");
-  if (unsubscribeRate > 0.005) addHint(hints, "PERFORMANCE_UNSUBSCRIBE_HIGH", "high", "safety", "Unsubscribe rate is above 0.5%.", "Reduce frequency and improve audience-message relevance.");
+  if (deliveryRate < performanceConfig.delivery.warning_below) addHint(hints, "PERFORMANCE_DELIVERY_LOW", "high", "delivery", "Delivery rate is below " + percentLabel(performanceConfig.delivery.warning_below) + ".", "Review list hygiene, suppressions, and provider rejection reasons.");
+  if (clickRate < performanceConfig.click.warning_below) addHint(hints, "PERFORMANCE_CLICK_LOW", "medium", "click", "Unique click rate is below " + percentLabel(performanceConfig.click.warning_below) + " of delivered messages.", "Test message relevance, CTA clarity, and audience fit.");
+  if (conversionRate < performanceConfig.conversion.warning_below) addHint(hints, "PERFORMANCE_CONVERSION_LOW", "medium", "conversion", "Attributed conversion rate is below " + percentLabel(performanceConfig.conversion.warning_below) + " of delivered messages.", "Check offer alignment, landing flow, and attribution-event integrity.");
+  if (complaintRate > performanceConfig.complaint.warning_above) addHint(hints, "PERFORMANCE_COMPLAINT_HIGH", "high", "safety", "Complaint rate is above " + percentLabel(performanceConfig.complaint.warning_above) + ".", "Pause expansion, inspect consent evidence, and narrow the audience before resuming.");
+  if (unsubscribeRate > performanceConfig.unsubscribe.warning_above) addHint(hints, "PERFORMANCE_UNSUBSCRIBE_HIGH", "high", "safety", "Unsubscribe rate is above " + percentLabel(performanceConfig.unsubscribe.warning_above) + ".", "Reduce frequency and improve audience-message relevance.");
   var safetyBlocked = false;
-  if (complaintRate >= 0.005) {
+  if (complaintRate >= performanceConfig.complaint.stop_at) {
     safetyBlocked = true;
     blockers.push("PERFORMANCE_COMPLAINT_GUARDRAIL");
-    addHint(hints, "PERFORMANCE_COMPLAINT_GUARDRAIL", "blocker", "safety", "Complaint rate reached the 0.5% stop threshold.", "Keep expansion blocked until consent, audience, and provider evidence are reviewed.");
+    addHint(hints, "PERFORMANCE_COMPLAINT_GUARDRAIL", "blocker", "safety", "Complaint rate reached the " + percentLabel(performanceConfig.complaint.stop_at) + " stop threshold.", "Keep expansion blocked until consent, audience, and provider evidence are reviewed.");
   }
-  if (unsubscribeRate >= 0.03) {
+  if (unsubscribeRate >= performanceConfig.unsubscribe.stop_at) {
     safetyBlocked = true;
     blockers.push("PERFORMANCE_UNSUBSCRIBE_GUARDRAIL");
-    addHint(hints, "PERFORMANCE_UNSUBSCRIBE_GUARDRAIL", "blocker", "safety", "Unsubscribe rate reached the 3% stop threshold.", "Keep expansion blocked and correct frequency or audience-message fit.");
+    addHint(hints, "PERFORMANCE_UNSUBSCRIBE_GUARDRAIL", "blocker", "safety", "Unsubscribe rate reached the " + percentLabel(performanceConfig.unsubscribe.stop_at) + " stop threshold.", "Keep expansion blocked and correct frequency or audience-message fit.");
   }
 
   var dimensions: ScoringDimension[] = [
@@ -897,33 +907,33 @@ export function scoreProgramPerformance(metricsInput: unknown, optionsInput?: un
       key: "delivery",
       label: "Delivery rate",
       score: deliveryScore,
-      max_score: 30,
-      status: statusForDimension(deliveryScore, 30, false),
-      detail: Math.round(deliveryRate * 10000) / 100 + "% delivered."
+      max_score: performanceConfig.delivery.max_score,
+      status: statusForDimension(deliveryScore, performanceConfig.delivery.max_score, false),
+      detail: percentLabel(deliveryRate) + " delivered."
     },
     {
       key: "click",
       label: "Click rate",
       score: clickScore,
-      max_score: 25,
-      status: statusForDimension(clickScore, 25, false),
-      detail: Math.round(clickRate * 10000) / 100 + "% unique clicks per delivered message."
+      max_score: performanceConfig.click.max_score,
+      status: statusForDimension(clickScore, performanceConfig.click.max_score, false),
+      detail: percentLabel(clickRate) + " unique clicks per delivered message."
     },
     {
       key: "conversion",
       label: "Conversion rate",
       score: conversionScore,
-      max_score: 30,
-      status: statusForDimension(conversionScore, 30, false),
-      detail: Math.round(conversionRate * 10000) / 100 + "% conversions per delivered message."
+      max_score: performanceConfig.conversion.max_score,
+      status: statusForDimension(conversionScore, performanceConfig.conversion.max_score, false),
+      detail: percentLabel(conversionRate) + " conversions per delivered message."
     },
     {
       key: "safety",
       label: "Complaint and unsubscribe safety",
       score: safetyScore,
-      max_score: 15,
-      status: statusForDimension(safetyScore, 15, safetyBlocked),
-      detail: Math.round(complaintRate * 10000) / 100 + "% complaints; " + Math.round(unsubscribeRate * 10000) / 100 + "% unsubscribes."
+      max_score: performanceConfig.complaint.max_score + performanceConfig.unsubscribe.max_score,
+      status: statusForDimension(safetyScore, performanceConfig.complaint.max_score + performanceConfig.unsubscribe.max_score, safetyBlocked),
+      detail: percentLabel(complaintRate) + " complaints; " + percentLabel(unsubscribeRate) + " unsubscribes."
     }
   ];
   var total = roundScore(deliveryScore + clickScore + conversionScore + safetyScore);

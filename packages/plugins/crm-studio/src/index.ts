@@ -76,6 +76,8 @@ export function crmStudioPlugin(): PluginDescriptor {
       { path: "/programs", label: "Programs", icon: "target" },
       { path: "/templates", label: "Templates", icon: "file-text" },
       { path: "/measurement", label: "Measurement", icon: "bar-chart" },
+      { path: "/statistics", label: "Statistics", icon: "trending-up" },
+      { path: "/configuration", label: "Configuration", icon: "sliders" },
       { path: "/events", label: "Events", icon: "activity" },
       { path: "/migration", label: "User Migration", icon: "refresh-cw" },
       { path: "/settings", label: "API Settings", icon: "settings" }

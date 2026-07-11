@@ -140,6 +140,8 @@ export interface MessageTemplate extends JsonRecord {
   quality_score: number;
   quality_grade: string;
   quality_result: JsonRecord;
+  quality_checked_at: string;
+  scoring_formula_version: string;
   config_revision_id: string;
   definition_fingerprint: string;
   created_at: string;
@@ -167,6 +169,7 @@ export interface GrowthProgram extends JsonRecord {
   readiness_grade: string;
   readiness_result: JsonRecord;
   readiness_checked_at: string;
+  scoring_formula_version: string;
   config_revision_id: string;
   definition_fingerprint: string;
   created_at: string;
@@ -222,6 +225,8 @@ export interface ScoreRun extends JsonRecord {
   id: string;
   schema_version: number;
   formula_version: string;
+  file_config_version: string;
+  file_config_fingerprint: string;
   program_key: string;
   period_key: string;
   status: "blocked" | "insufficient_data" | "scored";

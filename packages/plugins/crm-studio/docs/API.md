@@ -71,6 +71,31 @@ into sequenced requests.
 
 ## Routes
 
+### Inspect and load file configuration
+
+`GET v1/config/file/status` returns the bundled configuration version,
+fingerprint, formula version, activation thresholds, default-record comparison,
+and runtime status (`clean`, `missing_defaults`, or `drifted`).
+
+`POST v1/config/file/load` uses the standard mutation envelope. It validates
+the complete bundled manifest, creates only missing default segment records,
+and acknowledges the exact fingerprint. It never overwrites drifted runtime
+records. Exact request replays are idempotent; unknown operation fields are
+rejected.
+
+### Operational statistics
+
+`GET v1/statistics/summary` returns bounded, aggregate-only operational health:
+profile consent/health/eligibility counts, segment materialization, active and
+draft program/template counts, outcome rates, readiness/template/performance
+dimension health, per-program score coverage, configuration drift, and operator
+alerts. No profile rows or message content are returned.
+
+The score-run query is bounded by the file-configured window (default 50).
+Aggregates use only the newest immutable score run for each
+`(program_key, period_key)` and expose both `immutable_runs_loaded` and
+`current_program_period_snapshots` for auditability.
+
 ### Bootstrap defaults
 
 `POST v1/bootstrap`
@@ -385,7 +410,8 @@ and performance is available, `overall_score` is rounded from
 `0.4 * readiness_score + 0.6 * performance_score`; otherwise it is `null`.
 
 Each score run is immutable and reproducible. Its deterministic fingerprint
-pins formula version `crm-growth-score-v1`, program and template revision IDs,
+pins the bundled formula version (currently `crm-growth-score-v2-file-config`),
+the file configuration version and fingerprint, program and template revision IDs,
 the primary audience evidence, required safety evidence, and the selected
 metric-fact IDs and semantic fingerprints. Static audience evidence includes a
 membership epoch/count; dynamic evidence includes `active_generation` and its

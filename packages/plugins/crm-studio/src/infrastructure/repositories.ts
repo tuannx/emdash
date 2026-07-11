@@ -4,6 +4,7 @@ import type {
   IngestReceipt,
   JsonRecord
 } from "../types.js";
+import { buildFileDefaultSegments } from "../config/file-config.js";
 import { requestPayloadFingerprint, receiptId } from "../domain/membership.js";
 
 export interface ReceiptCheck {
@@ -61,75 +62,10 @@ export async function bumpSegmentMembershipEpoch(ctx: CrmContext, segmentKey: st
   return nextValue;
 }
 
-function defaultSegment(
-  key: string,
-  name: string,
-  description: string,
-  kind: "static" | "dynamic",
-  groupKey: string | null,
-  rule: JsonRecord | null,
-  timestamp: string
-): CrmSegment {
-  return {
-    id: "segment:" + key,
-    schema_version: 1,
-    key: key,
-    name: name,
-    description: description,
-    kind: kind,
-    evaluation_mode: kind === "dynamic" ? "scheduled" : "event",
-    rule: rule,
-    membership_limit: null,
-    group_key: groupKey,
-    is_active: true,
-    active_generation: kind === "static" ? "static" : null,
-    created_at: timestamp,
-    updated_at: timestamp,
-    last_recomputed_at: null
-  };
-}
-
 export async function ensureDefaults(ctx: CrmContext, dryRun?: boolean): Promise<BootstrapPlan> {
   var deliveryMode = await ctx.kv.get<string>("settings:deliveryMode");
   var timestamp = new Date().toISOString();
-  var defaults = [
-    defaultSegment(
-      "emdash_users",
-      "All EmDash users",
-      "Static migration cohort. Membership does not imply marketing eligibility.",
-      "static",
-      null,
-      null,
-      timestamp
-    ),
-    defaultSegment(
-      "crm_blacklist",
-      "CRM blacklist",
-      "Manual safety exclusion for every campaign channel.",
-      "static",
-      "crm_contact_safety",
-      null,
-      timestamp
-    ),
-    defaultSegment(
-      "paid_tv_users",
-      "Paid TV users",
-      "Safety audience for direct payers and shared-TV users when the host feed provides paid_tv_access.",
-      "dynamic",
-      "crm_contact_safety",
-      { trait: "paid_tv_access", operator: "eq", value: true },
-      timestamp
-    ),
-    defaultSegment(
-      "paying_customers",
-      "Paying customers",
-      "Safety audience for profiles classified as paying.",
-      "dynamic",
-      "crm_contact_safety",
-      { trait: "billing_state", operator: "eq", value: "paying" },
-      timestamp
-    )
-  ];
+  var defaults = buildFileDefaultSegments(timestamp);
   var writes: Array<{ id: string; data: CrmSegment }> = [];
   var missingSegmentKeys: string[] = [];
   var defaultIds: string[] = [];

@@ -10,6 +10,7 @@ async function invoke(route, input) {
 }
 
 await invoke("v1/bootstrap", mutationInput("growth-bootstrap-0001"));
+await invoke("v1/config/file/load", mutationInput("growth-file-config-0001"));
 await invoke("v1/profiles/upsert-batch", mutationInput("growth-profile-0001", {
   profiles: [{ external_id: "growth-audience-member", traits: {} }],
 }));
@@ -36,6 +37,7 @@ const templateCreated = await invoke("v1/templates/upsert", templateBody);
 assert.equal(templateCreated.ok, true);
 assert.equal(templateCreated.data.outcome, "created");
 assert.equal(templateCreated.data.template.quality_score, 100);
+assert.equal(templateCreated.data.template.scoring_formula_version, "crm-growth-score-v2-file-config");
 assert.equal(templateCreated.data.template.delivery_enabled, false);
 assert.equal(await ctx.storage.configRevisions.count(), 1);
 assert.deepEqual(await invoke("v1/templates/upsert", templateBody), templateCreated);
@@ -98,6 +100,7 @@ const programBody = mutationInput("growth-program-0001", {
 const programCreated = await invoke("v1/programs/upsert", programBody);
 assert.equal(programCreated.ok, true);
 assert.equal(programCreated.data.program.readiness_score, 100);
+assert.equal(programCreated.data.program.scoring_formula_version, "crm-growth-score-v2-file-config");
 assert.equal(programCreated.data.program.delivery_enabled, false);
 assert.equal(await ctx.storage.configRevisions.count(), 2);
 
@@ -173,6 +176,9 @@ const scoreResult = await invoke("v1/programs/evaluate", mutationInput("growth-s
 assert.equal(scoreResult.ok, true);
 assert.equal(scoreResult.data.score_run.status, "scored");
 assert.equal(scoreResult.data.score_run.overall_score, 100);
+assert.equal(scoreResult.data.score_run.formula_version, "crm-growth-score-v2-file-config");
+assert.equal(scoreResult.data.score_run.file_config_version, "2026-07-11.2");
+assert.match(scoreResult.data.score_run.file_config_fingerprint, /^[a-f0-9]{64}$/);
 assert.equal(scoreResult.data.score_run.input_fact_ids.length, 1);
 assert.ok(scoreResult.data.score_run.input_fact_ids[0].includes("|2|"));
 assert.equal(await ctx.storage.scoreRuns.count(), 1);
@@ -421,7 +427,20 @@ const piiRequestId = await invoke("v1/metrics/ingest-batch", {
 assert.equal(piiRequestId.ok, false);
 assert.equal(piiRequestId.error.code, "INVALID_REQUEST_ID");
 
-for (const page of ["/programs", "/templates", "/measurement"]) {
+const statisticsResult = await sandbox.routes["v1/statistics/summary"].handler(
+  routeContext("GET", {}),
+  ctx,
+);
+assert.equal(statisticsResult.ok, true);
+assert.equal(statisticsResult.data.statistics.measurement.score_run_status.scored >= 1, true);
+assert.equal(statisticsResult.data.statistics.measurement.aggregate_rates_percent.delivery > 0, true);
+assert.equal(statisticsResult.data.statistics.components.some((row) => row.scope === "readiness" && row.component === "measurement"), true);
+assert.equal(statisticsResult.data.statistics.components.some((row) => row.scope === "template" && row.component === "safety"), true);
+assert.equal(statisticsResult.data.statistics.components.some((row) => row.scope === "performance" && row.component === "conversion"), true);
+assert.equal(statisticsResult.data.statistics.program_rows.some((row) => row.program_key === "premium_reactivation" && row.formula_current === true), true);
+assert.equal(JSON.stringify(statisticsResult).includes(privateBodyMarker), false, "statistics must not expose template bodies");
+
+for (const page of ["/programs", "/templates", "/measurement", "/statistics", "/configuration"]) {
   const adminResult = await sandbox.routes.admin.handler(
     routeContext("POST", { type: "page_load", page }),
     ctx,

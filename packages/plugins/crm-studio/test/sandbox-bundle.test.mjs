@@ -6,6 +6,9 @@ const bundle = await readFile(new URL("../dist/sandbox.mjs", import.meta.url), "
 assert.equal(/from\s+["']\.\//.test(bundle), false, "sandbox bundle must not contain relative imports");
 assert.equal(/import\s*\(["']\.\//.test(bundle), false, "sandbox bundle must not dynamically import relative files");
 assert.match(bundle, /v1\/segments\/members\/add/);
+assert.match(bundle, /v1\/statistics\/summary/);
+assert.match(bundle, /v1\/config\/file\/load/);
+assert.match(bundle, /crm-growth-score-v2-file-config/);
 
 function stripComments(source) {
   return source

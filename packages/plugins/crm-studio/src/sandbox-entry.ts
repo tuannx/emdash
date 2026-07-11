@@ -3,6 +3,8 @@ import type { CrmContext } from "./types.js";
 import { handleAdmin } from "./presentation/admin.js";
 import {
   handleBootstrap,
+  handleFileConfigLoad,
+  handleFileConfigStatus,
   handleMetricFactsIngest,
   handleMigrationStatus,
   handleMigrationStep,
@@ -15,6 +17,7 @@ import {
   handleSegmentRecompute,
   handleSegmentsList,
   handleSegmentUpsert,
+  handleStatisticsSummary,
   handleTemplateUpsert
 } from "./presentation/routes.js";
 
@@ -28,6 +31,21 @@ export default {
     "v1/bootstrap": {
       handler: async function(routeCtx, ctx) {
         return await handleBootstrap(routeCtx, ctx as unknown as CrmContext);
+      }
+    },
+    "v1/statistics/summary": {
+      handler: async function(routeCtx, ctx) {
+        return await handleStatisticsSummary(routeCtx, ctx as unknown as CrmContext);
+      }
+    },
+    "v1/config/file/status": {
+      handler: async function(routeCtx, ctx) {
+        return await handleFileConfigStatus(routeCtx, ctx as unknown as CrmContext);
+      }
+    },
+    "v1/config/file/load": {
+      handler: async function(routeCtx, ctx) {
+        return await handleFileConfigLoad(routeCtx, ctx as unknown as CrmContext);
       }
     },
     "v1/profiles/upsert-batch": {

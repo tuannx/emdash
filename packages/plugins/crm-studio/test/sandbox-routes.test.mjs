@@ -7,6 +7,8 @@ import { createCtx, mutationInput, routeContext } from "./helpers.mjs";
 const expectedRoutes = [
   "admin",
   "v1/bootstrap",
+  "v1/config/file/load",
+  "v1/config/file/status",
   "v1/metrics/ingest-batch",
   "v1/profiles/upsert-batch",
   "v1/programs/evaluate",
@@ -17,6 +19,7 @@ const expectedRoutes = [
   "v1/segments/members/remove",
   "v1/segments/recompute-step",
   "v1/segments/preview",
+  "v1/statistics/summary",
   "v1/migrations/emdash-users/step",
   "v1/migrations/emdash-users/status",
   "v1/templates/upsert",
@@ -41,6 +44,8 @@ assert.ok(descriptor.storage.messageTemplates);
 assert.ok(descriptor.storage.configRevisions);
 assert.ok(descriptor.storage.metricFacts);
 assert.ok(descriptor.storage.scoreRuns);
+assert.ok(descriptor.adminPages.some((page) => page.path === "/statistics"));
+assert.ok(descriptor.adminPages.some((page) => page.path === "/configuration"));
 
 const users = [];
 for (let index = 0; index < 105; index++) {
@@ -82,6 +87,96 @@ const repairedBootstrap = await invoke("v1/bootstrap", "POST", mutationInput("bo
 assert.equal(repairedBootstrap.ok, true);
 assert.deepEqual(repairedBootstrap.data.plan.missing_segment_keys, ["paying_customers"]);
 assert.equal(await ctx.storage.segments.count(), 4, "bootstrap must repair a missing default after initial setup");
+
+const fileConfigCtx = createCtx();
+await sandbox.routes["v1/bootstrap"].handler(
+  routeContext("POST", mutationInput("file-config-bootstrap-0001")),
+  fileConfigCtx,
+);
+const fileConfigStatusBefore = await sandbox.routes["v1/config/file/status"].handler(
+  routeContext("GET", {}),
+  fileConfigCtx,
+);
+assert.equal(fileConfigStatusBefore.ok, true);
+assert.equal(fileConfigStatusBefore.data.config.deployment_status, "review_required");
+assert.equal(fileConfigStatusBefore.data.config.runtime_status, "clean");
+const fileConfigLoadBody = mutationInput("file-config-load-0001");
+const fileConfigLoaded = await sandbox.routes["v1/config/file/load"].handler(
+  routeContext("POST", fileConfigLoadBody),
+  fileConfigCtx,
+);
+assert.equal(fileConfigLoaded.ok, true);
+assert.equal(fileConfigLoaded.data.config.deployment_status, "acknowledged");
+assert.equal(fileConfigLoaded.data.config.runtime_status, "clean");
+assert.equal(fileConfigLoaded.data.existing_drift_overwritten, false);
+assert.deepEqual(
+  await sandbox.routes["v1/config/file/load"].handler(routeContext("POST", fileConfigLoadBody), fileConfigCtx),
+  fileConfigLoaded,
+  "file config load must replay its checkpointed result",
+);
+const fileConfigUnknownField = await sandbox.routes["v1/config/file/load"].handler(
+  routeContext("POST", mutationInput("file-config-load-unknown-0001", { reset_runtime: true })),
+  fileConfigCtx,
+);
+assert.equal(fileConfigUnknownField.ok, false);
+assert.equal(fileConfigUnknownField.error.code, "UNKNOWN_OPERATION_FIELD");
+const driftedPayingSegment = await fileConfigCtx.storage.segments.get("segment:paying_customers");
+driftedPayingSegment.description = "Operator-owned runtime description";
+await fileConfigCtx.storage.segments.put(driftedPayingSegment.id, driftedPayingSegment);
+const fileConfigDrift = await sandbox.routes["v1/config/file/status"].handler(
+  routeContext("GET", {}),
+  fileConfigCtx,
+);
+assert.equal(fileConfigDrift.data.config.runtime_status, "drifted");
+assert.deepEqual(fileConfigDrift.data.config.drifted_segment_keys, ["paying_customers"]);
+const fileConfigReloaded = await sandbox.routes["v1/config/file/load"].handler(
+  routeContext("POST", mutationInput("file-config-load-0002")),
+  fileConfigCtx,
+);
+assert.equal(fileConfigReloaded.ok, true);
+assert.equal(fileConfigReloaded.data.config.runtime_status, "drifted");
+assert.equal(
+  (await fileConfigCtx.storage.segments.get("segment:paying_customers")).description,
+  "Operator-owned runtime description",
+  "load must not overwrite drifted runtime records",
+);
+const emptyStatistics = await sandbox.routes["v1/statistics/summary"].handler(
+  routeContext("GET", {}),
+  fileConfigCtx,
+);
+assert.equal(emptyStatistics.ok, true);
+assert.equal(emptyStatistics.data.statistics.profiles.total, 0);
+assert.equal(emptyStatistics.data.statistics.file_config.runtime_status, "drifted");
+assert.equal(
+  (await sandbox.routes["v1/statistics/summary"].handler(routeContext("POST", {}), fileConfigCtx)).error.code,
+  "METHOD_NOT_ALLOWED",
+);
+
+const adminConfigCtx = createCtx();
+const adminConfigPage = await sandbox.routes.admin.handler(
+  routeContext("POST", { type: "page_load", page: "/configuration" }),
+  adminConfigCtx,
+);
+const adminConfigValidation = validateBlocks(adminConfigPage.blocks);
+assert.equal(adminConfigValidation.valid, true, JSON.stringify(adminConfigValidation.errors));
+assert.equal(JSON.stringify(adminConfigPage.blocks).includes("2026-07-11.2"), true);
+assert.equal(JSON.stringify(adminConfigPage.blocks).includes("src/config/file-config.ts"), true);
+const adminConfigLoad = await sandbox.routes.admin.handler(
+  routeContext("POST", { type: "block_action", action_id: "load_file_config" }),
+  adminConfigCtx,
+);
+assert.equal(adminConfigLoad.toast.type, "success");
+assert.equal(
+  (await sandbox.routes["v1/config/file/status"].handler(routeContext("GET", {}), adminConfigCtx)).data.config.deployment_status,
+  "acknowledged",
+  "admin action must checkpoint the exact bundled file config",
+);
+const adminStatisticsPage = await sandbox.routes.admin.handler(
+  routeContext("POST", { type: "page_load", page: "/statistics" }),
+  adminConfigCtx,
+);
+const adminStatisticsValidation = validateBlocks(adminStatisticsPage.blocks);
+assert.equal(adminStatisticsValidation.valid, true, JSON.stringify(adminStatisticsValidation.errors));
 
 const firstMigrationBody = mutationInput("migration-0001", { restart: true, limit: 30 });
 const firstMigration = await invoke("v1/migrations/emdash-users/step", "POST", firstMigrationBody);

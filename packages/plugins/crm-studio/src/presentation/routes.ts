@@ -36,6 +36,8 @@ import { recomputeSegmentStep } from "../application/recompute-segment.js";
 import { getMigrationState, migrationStateView, syncEmDashUsersStep } from "../application/sync-emdash-users.js";
 import { checkReceipt, ensureDefaults, writeReceipt } from "../infrastructure/repositories.js";
 import { serializeMutation } from "../infrastructure/mutation-queue.js";
+import { buildOperationalStatistics } from "../application/build-operational-statistics.js";
+import { inspectFileConfig, loadFileConfig } from "../application/manage-file-config.js";
 
 interface MutationOperation {
   (envelope: MutationEnvelope, payloadFingerprint: string): Promise<JsonRecord>;
@@ -182,6 +184,35 @@ export async function handleBootstrap(routeCtx: SandboxedRouteInput, ctx: CrmCon
       concurrency_mode: "single_sequenced_writer_required",
       plan: plan
     });
+  });
+}
+
+export async function handleStatisticsSummary(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {
+  var methodError = requireMethod(routeCtx.request.method, "GET");
+  if (methodError) return methodError;
+  return apiSuccess({ statistics: await buildOperationalStatistics(ctx) });
+}
+
+export async function handleFileConfigStatus(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {
+  var methodError = requireMethod(routeCtx.request.method, "GET");
+  if (methodError) return methodError;
+  return apiSuccess({ config: await inspectFileConfig(ctx) });
+}
+
+export async function handleFileConfigLoad(routeCtx: SandboxedRouteInput, ctx: CrmContext): Promise<JsonRecord> {
+  return await runMutation(ctx, routeCtx, "v1/config/file/load", async function(envelope) {
+    var keys = Object.keys(envelope.input);
+    var allowed: Record<string, boolean> = {
+      schema_version: true,
+      request_id: true,
+      source: true,
+      occurred_at: true,
+      dry_run: true
+    };
+    for (var index = 0; index < keys.length; index++) {
+      if (!allowed[keys[index]]) return apiError("UNKNOWN_OPERATION_FIELD", "Unsupported file config load field: " + keys[index]);
+    }
+    return await loadFileConfig(ctx, envelope.request_id, envelope.occurred_at, envelope.dry_run);
   });
 }
 

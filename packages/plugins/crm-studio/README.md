@@ -30,7 +30,8 @@ audience bounded context described by the Growth Studio specification.
 - Ingests aggregate-only measurement facts in append-only correction streams
   and creates immutable, input-fingerprinted score runs by program period.
 - Renders Block Kit admin pages for profiles, segments, programs, templates,
-  measurement, migration, events, and API integration.
+  measurement, operational statistics, file configuration, migration, events,
+  and API integration.
 
 Live campaign delivery and tracking are not part of V1. `deliveryMode` is
 bootstrapped to `disabled`, every program/template has
@@ -108,6 +109,30 @@ Use the private routes `v1/templates/upsert`, `v1/programs/upsert`,
 `v1/metrics/ingest-batch` (maximum 16 facts), and `v1/programs/evaluate`, or
 the **Templates**, **Programs**, and **Measurement** admin pages. Scoring does
 not send messages or prove provider-side tracking.
+
+## File configuration and operational statistics
+
+The versioned source of truth is `src/config/file-config.ts`. It defines
+scoring weights, thresholds, grade bands, statistics bounds, and the default
+segment definitions. The TypeScript manifest is bundled into the sandbox, so
+runtime scoring never depends on filesystem access or an optional YAML parser.
+
+Open **CRM Studio -> Configuration** to inspect the bundled version,
+fingerprint, runtime drift, and the last acknowledged load. **Load file config**
+validates the complete manifest and creates only missing default segment
+records. It never overwrites a changed runtime definition or historical data;
+drift remains visible for operator review.
+
+Open **CRM Studio -> Statistics** for profile eligibility and safety coverage,
+segment materialization, program/template readiness, outcome rates, scoring
+component health, and operator alerts. The read model is bounded to the newest
+configured score-run window (default 50 immutable runs). For every
+`(program_key, period_key)`, only the newest run contributes to aggregate rates;
+the page reports both immutable runs loaded and current snapshots so repeated
+evaluation cannot double-count a program period.
+
+The same surfaces are available through `GET v1/config/file/status`,
+`POST v1/config/file/load`, and `GET v1/statistics/summary`.
 
 ## Installation
 

@@ -189,10 +189,14 @@ scoring read models over supplied aggregate facts; they do not claim that CRM
 Studio sent, tracked, or attributed any message.
 
 The Block Kit admin surface exposes `/templates` for definition/quality score,
-`/programs` for safety/readiness configuration, and `/measurement` for one-fact
-ingest plus immutable period evaluation. The dashboard shows counts and the
-latest score status. Template bodies are not rendered as raw admin HTML, and no
-admin action invokes delivery or tracking.
+`/programs` for safety/readiness configuration, `/measurement` for one-fact
+ingest plus immutable period evaluation, `/configuration` for bundled-file
+fingerprint and runtime drift, and `/statistics` for bounded operational health.
+Statistics deduplicate immutable runs to the newest snapshot per program and
+period before computing aggregates. File loads validate the complete manifest
+and create only missing defaults; they never overwrite drifted runtime records.
+Template bodies are not rendered as raw admin HTML, and no admin action invokes
+delivery or tracking.
 
 ## Rule safety
 

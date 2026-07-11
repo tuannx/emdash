@@ -16,8 +16,9 @@ import {
 } from "../domain/scoring.js";
 import { apiError, apiSuccess, isJsonRecord } from "./contracts.js";
 import { getSegmentMembershipEpoch } from "../infrastructure/repositories.js";
+import { CRM_STUDIO_FILE_CONFIG } from "../config/file-config.js";
 
-export var GROWTH_SCORE_FORMULA_VERSION = "crm-growth-score-v1";
+export var GROWTH_SCORE_FORMULA_VERSION = CRM_STUDIO_FILE_CONFIG.formula_version;
 var METRIC_FACT_BATCH_LIMIT = 16;
 var METRIC_FACT_QUERY_LIMIT = 100;
 
@@ -275,6 +276,8 @@ export async function upsertMessageTemplate(
     quality_score: 0,
     quality_grade: "",
     quality_result: {},
+    quality_checked_at: occurredAt,
+    scoring_formula_version: GROWTH_SCORE_FORMULA_VERSION,
     config_revision_id: "",
     definition_fingerprint: "",
     created_at: existing ? existing.created_at : occurredAt,
@@ -286,16 +289,17 @@ export async function upsertMessageTemplate(
   };
   var definition = templateDefinition(provisional);
   var definitionFingerprint = await requestPayloadFingerprint("message-template-definition", definition);
-  if (existing && existing.definition_fingerprint === definitionFingerprint) {
+  var definitionUnchanged = !!existing && existing.definition_fingerprint === definitionFingerprint;
+  if (existing && definitionUnchanged && existing.scoring_formula_version === GROWTH_SCORE_FORMULA_VERSION) {
     var replayedOutcome = existing.last_request_id === requestId && existing.last_payload_fingerprint === payloadFingerprint
       ? existing.last_outcome || "updated"
       : "unchanged";
     return apiSuccess({ dry_run: dryRun, outcome: replayedOutcome, template: existing, revision_created: false });
   }
-  if (existing && staleUpdate(existing.updated_at, existing.last_request_id, occurredAt, requestId)) {
+  if (existing && !definitionUnchanged && staleUpdate(existing.updated_at, existing.last_request_id, occurredAt, requestId)) {
     return apiError("STALE_TEMPLATE_UPDATE", "Template update is older than the current definition");
   }
-  if (existing) {
+  if (existing && !definitionUnchanged) {
     var activeReferences = await ctx.storage.programs.query({
       where: { template_key: key, is_active: true },
       limit: 1
@@ -308,8 +312,17 @@ export async function upsertMessageTemplate(
   provisional.quality_score = quality.score;
   provisional.quality_grade = quality.grade;
   provisional.quality_result = quality;
-  if (provisional.is_active && (quality.blockers.length > 0 || quality.score < 75)) {
-    return apiError("TEMPLATE_NOT_READY", "An active template must have no safety blockers and a quality score of at least 75");
+  if (provisional.is_active && (quality.blockers.length > 0 || quality.score < CRM_STUDIO_FILE_CONFIG.activation_minimum_score)) {
+    return apiError("TEMPLATE_NOT_READY", "An active template must have no safety blockers and meet the file-config activation score");
+  }
+  if (existing && definitionUnchanged) {
+    existing.quality_score = quality.score;
+    existing.quality_grade = quality.grade;
+    existing.quality_result = quality;
+    existing.quality_checked_at = occurredAt;
+    existing.scoring_formula_version = GROWTH_SCORE_FORMULA_VERSION;
+    if (!dryRun) await ctx.storage.messageTemplates.put(existing.id, existing);
+    return apiSuccess({ dry_run: dryRun, outcome: "rescored", template: existing, revision_created: false });
   }
   provisional.definition_fingerprint = definitionFingerprint;
   provisional.config_revision_id = configRevisionId("message_template", key, definitionFingerprint);
@@ -541,6 +554,7 @@ export async function upsertGrowthProgram(
     readiness_grade: "",
     readiness_result: {},
     readiness_checked_at: occurredAt,
+    scoring_formula_version: GROWTH_SCORE_FORMULA_VERSION,
     config_revision_id: "",
     definition_fingerprint: "",
     created_at: existing ? existing.created_at : occurredAt,
@@ -577,14 +591,15 @@ export async function upsertGrowthProgram(
     readiness.safety_evidence = safetyEvidence.evidence;
     readiness.safety_evidence_fingerprint = safetyEvidence.fingerprint;
   }
-  if (provisional.is_active && (readiness.blockers.length > 0 || readiness.score < 75)) {
-    return apiError("PROGRAM_NOT_READY", "An active program must have no readiness blockers and a readiness score of at least 75");
+  if (provisional.is_active && (readiness.blockers.length > 0 || readiness.score < CRM_STUDIO_FILE_CONFIG.activation_minimum_score)) {
+    return apiError("PROGRAM_NOT_READY", "An active program must have no readiness blockers and meet the file-config activation score");
   }
   if (existing && definitionUnchanged) {
     existing.readiness_score = readiness.score;
     existing.readiness_grade = readiness.grade;
     existing.readiness_result = readiness;
     existing.readiness_checked_at = occurredAt;
+    existing.scoring_formula_version = GROWTH_SCORE_FORMULA_VERSION;
     if (!dryRun) await ctx.storage.programs.put(existing.id, existing);
     var replayedOutcome = existing.last_request_id === requestId && existing.last_payload_fingerprint === payloadFingerprint
       ? existing.last_outcome || "updated"
@@ -936,7 +951,10 @@ export async function evaluateGrowthProgramPeriod(
   else if (performance.score === null) status = "insufficient_data";
   else {
     status = "scored";
-    overallScore = Math.round(readiness.score * 0.4 + performance.score * 0.6);
+    overallScore = Math.round(
+      readiness.score * CRM_STUDIO_FILE_CONFIG.overall.readiness_weight +
+      performance.score * CRM_STUDIO_FILE_CONFIG.overall.performance_weight
+    );
   }
   var inputFactIds: string[] = [];
   var inputFacts: JsonRecord[] = [];
@@ -944,8 +962,11 @@ export async function evaluateGrowthProgramPeriod(
     inputFactIds.push(selected[selectedIndex].id);
     inputFacts.push({ id: selected[selectedIndex].id, semantic_fingerprint: selected[selectedIndex].semantic_fingerprint });
   }
+  var fileConfigFingerprint = await requestPayloadFingerprint("crm-studio-file-config", CRM_STUDIO_FILE_CONFIG);
   var inputFingerprint = await requestPayloadFingerprint("growth-score-inputs", {
     formula_version: GROWTH_SCORE_FORMULA_VERSION,
+    file_config_version: CRM_STUDIO_FILE_CONFIG.config_version,
+    file_config_fingerprint: fileConfigFingerprint,
     program_revision_id: program.config_revision_id,
     template_revision_id: template.config_revision_id,
     audience_evidence_fingerprint: audienceEvidence.fingerprint,
@@ -959,6 +980,8 @@ export async function evaluateGrowthProgramPeriod(
     id: id,
     schema_version: 1,
     formula_version: GROWTH_SCORE_FORMULA_VERSION,
+    file_config_version: CRM_STUDIO_FILE_CONFIG.config_version,
+    file_config_fingerprint: fileConfigFingerprint,
     program_key: programKey,
     period_key: periodKey,
     status: status,

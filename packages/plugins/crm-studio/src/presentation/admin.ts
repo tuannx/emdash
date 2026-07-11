@@ -25,6 +25,9 @@ import {
 import { getMigrationState, syncEmDashUsersStep } from "../application/sync-emdash-users.js";
 import { ensureDefaults } from "../infrastructure/repositories.js";
 import { serializeMutation } from "../infrastructure/mutation-queue.js";
+import { buildOperationalStatistics } from "../application/build-operational-statistics.js";
+import { inspectFileConfig, loadFileConfig } from "../application/manage-file-config.js";
+import { CRM_STUDIO_FILE_CONFIG } from "../config/file-config.js";
 
 function toast(message: string, type: "success" | "error" | "info", blocks: Block[]): BlockResponse {
   return { blocks: blocks, toast: { message: message, type: type } };
@@ -34,6 +37,25 @@ function resultErrorMessage(result: JsonRecord): string {
   if (result.ok === true) return "";
   if (isJsonRecord(result.error) && typeof result.error.message === "string") return result.error.message;
   return "Operation failed";
+}
+
+function displayValue(value: unknown, suffix?: string): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value) + (suffix || "");
+  if (typeof value === "string" && value) return value + (suffix || "");
+  return "—";
+}
+
+function recordValue(parent: JsonRecord, key: string): JsonRecord {
+  return isJsonRecord(parent[key]) ? parent[key] as JsonRecord : {};
+}
+
+function recordArray(value: unknown): JsonRecord[] {
+  if (!Array.isArray(value)) return [];
+  var output: JsonRecord[] = [];
+  for (var index = 0; index < value.length; index++) {
+    if (isJsonRecord(value[index])) output.push(value[index] as JsonRecord);
+  }
+  return output;
 }
 
 async function buildDashboard(ctx: CrmContext): Promise<BlockResponse> {
@@ -527,6 +549,248 @@ async function buildMeasurement(ctx: CrmContext, scoreCursor?: string): Promise<
   };
 }
 
+async function buildStatistics(ctx: CrmContext): Promise<BlockResponse> {
+  var statistics = await buildOperationalStatistics(ctx);
+  var profiles = recordValue(statistics, "profiles");
+  var segments = recordValue(statistics, "segments");
+  var programs = recordValue(statistics, "programs");
+  var templates = recordValue(statistics, "templates");
+  var measurement = recordValue(statistics, "measurement");
+  var status = recordValue(measurement, "score_run_status");
+  var rates = recordValue(measurement, "aggregate_rates_percent");
+  var counts = recordValue(measurement, "aggregate_counts");
+  var window = recordValue(statistics, "window");
+  var components = recordArray(statistics.components);
+  var componentRows: Array<Record<string, unknown>> = [];
+  var componentLimit = Math.min(components.length, CRM_STUDIO_FILE_CONFIG.statistics.table_limit);
+  for (var componentIndex = 0; componentIndex < componentLimit; componentIndex++) {
+    componentRows.push({
+      scope: components[componentIndex].scope,
+      component: components[componentIndex].label,
+      average: displayValue(components[componentIndex].average_percent, "%"),
+      runs: components[componentIndex].runs,
+      pass: components[componentIndex].pass,
+      warn: components[componentIndex].warn,
+      blocked: components[componentIndex].blocked,
+      insufficient: components[componentIndex].insufficient
+    });
+  }
+  var componentTable: TableBlock = {
+    type: "table",
+    block_id: "statistics_components_table",
+    columns: [
+      { key: "scope", label: "Layer", format: "badge" },
+      { key: "component", label: "Component", format: "text" },
+      { key: "average", label: "Average", format: "text" },
+      { key: "runs", label: "Runs", format: "text" },
+      { key: "pass", label: "Pass", format: "text" },
+      { key: "warn", label: "Warn", format: "text" },
+      { key: "blocked", label: "Blocked", format: "text" },
+      { key: "insufficient", label: "Insufficient", format: "text" }
+    ],
+    rows: componentRows,
+    page_action_id: "statistics_components_page",
+    empty_text: "No component statistics yet. Evaluate at least one program period."
+  };
+  var programRecords = recordArray(statistics.program_rows);
+  var programRows: Array<Record<string, unknown>> = [];
+  var programLimit = Math.min(programRecords.length, CRM_STUDIO_FILE_CONFIG.statistics.table_limit);
+  for (var programIndex = 0; programIndex < programLimit; programIndex++) {
+    programRows.push({
+      program_key: programRecords[programIndex].program_key,
+      state: programRecords[programIndex].state,
+      readiness: displayValue(programRecords[programIndex].readiness_score),
+      period: programRecords[programIndex].latest_period || "—",
+      score_status: programRecords[programIndex].latest_status,
+      overall: displayValue(programRecords[programIndex].latest_overall_score),
+      performance: displayValue(programRecords[programIndex].latest_performance_score),
+      formula: programRecords[programIndex].formula_current === true ? "current" : "stale/missing",
+      evaluated_at: programRecords[programIndex].evaluated_at || "—"
+    });
+  }
+  var programTable: TableBlock = {
+    type: "table",
+    block_id: "statistics_programs_table",
+    columns: [
+      { key: "program_key", label: "Program", format: "code" },
+      { key: "state", label: "State", format: "badge" },
+      { key: "readiness", label: "Ready", format: "text" },
+      { key: "period", label: "Latest period", format: "code" },
+      { key: "score_status", label: "Status", format: "badge" },
+      { key: "overall", label: "Overall", format: "text" },
+      { key: "performance", label: "Performance", format: "text" },
+      { key: "formula", label: "Formula", format: "badge" },
+      { key: "evaluated_at", label: "Evaluated", format: "relative_time" }
+    ],
+    rows: programRows,
+    page_action_id: "statistics_programs_page",
+    empty_text: "No programs are configured."
+  };
+  var blocks: Block[] = [
+    { type: "header", text: "Operational Statistics" },
+    {
+      type: "banner",
+      title: "Bounded, revision-aware statistics",
+      description: "Loaded " + window.immutable_runs_loaded + " immutable runs and selected " + window.current_program_period_snapshots + " latest program-period snapshots from a window of at most " + window.score_runs + ". Truncated windows are disclosed instead of silently implying full history.",
+      variant: window.score_runs_truncated === true ? "alert" : "default"
+    },
+    {
+      type: "stats",
+      items: [
+        { label: "Profiles", value: profiles.total as number || 0 },
+        { label: "Eligible", value: profiles.eligible_for_messaging as number || 0 },
+        { label: "Active programs", value: programs.active as number || 0 },
+        { label: "Ready templates", value: templates.activation_ready as number || 0 },
+        { label: "Scored runs", value: status.scored as number || 0 },
+        { label: "Blocked runs", value: status.blocked as number || 0 }
+      ]
+    },
+    {
+      type: "fields",
+      fields: [
+        { label: "Consent granted", value: displayValue(profiles.consent_granted) },
+        { label: "Consent unknown", value: displayValue(profiles.consent_unknown) },
+        { label: "Healthy email", value: displayValue(profiles.email_health_healthy) },
+        { label: "Eligible rate", value: displayValue(profiles.eligible_rate_percent, "%") },
+        { label: "Dynamic materialized", value: displayValue(segments.dynamic_materialized) },
+        { label: "Dynamic unmaterialized", value: displayValue(segments.dynamic_unmaterialized) },
+        { label: "Average template quality", value: displayValue(templates.average_quality) },
+        { label: "Average program readiness", value: displayValue(programs.average_readiness) },
+        { label: "Average overall", value: displayValue(measurement.average_overall_score) },
+        { label: "Average performance", value: displayValue(measurement.average_performance_score) },
+        { label: "Fact revisions", value: displayValue(measurement.fact_revisions_total) },
+        { label: "Formula version", value: String(statistics.formula_version || "—") }
+      ]
+    },
+    { type: "divider" },
+    { type: "header", text: "Aggregate outcome rates" },
+    {
+      type: "fields",
+      fields: [
+        { label: "Sent", value: displayValue(counts.sent) },
+        { label: "Delivered", value: displayValue(counts.delivered) },
+        { label: "Delivery rate", value: displayValue(rates.delivery, "%") },
+        { label: "Click rate", value: displayValue(rates.click, "%") },
+        { label: "Conversion rate", value: displayValue(rates.conversion, "%") },
+        { label: "Complaint rate", value: displayValue(rates.complaint, "%") },
+        { label: "Unsubscribe rate", value: displayValue(rates.unsubscribe, "%") },
+        { label: "Insufficient runs", value: displayValue(status.insufficient_data) }
+      ]
+    },
+    { type: "divider" },
+    { type: "header", text: "Component health" },
+    componentTable,
+    { type: "divider" },
+    { type: "header", text: "Program score coverage" },
+    programTable
+  ];
+  var alerts = recordArray(statistics.alerts);
+  if (alerts.length > 0) {
+    blocks.push({ type: "divider" });
+    blocks.push({ type: "header", text: "Operator alerts" });
+    for (var alertIndex = 0; alertIndex < alerts.length; alertIndex++) {
+      blocks.push({
+        type: "banner",
+        title: String(alerts[alertIndex].code || "STATISTICS_ALERT") + " · " + displayValue(alerts[alertIndex].count),
+        description: String(alerts[alertIndex].action || "Review the affected component."),
+        variant: alerts[alertIndex].severity === "high" ? "error" : "alert"
+      });
+    }
+  }
+  blocks.push({ type: "actions", elements: [{ type: "button", label: "Refresh statistics", action_id: "refresh_statistics", style: "secondary" }] });
+  return { blocks: blocks };
+}
+
+async function buildConfiguration(ctx: CrmContext): Promise<BlockResponse> {
+  var inspection = await inspectFileConfig(ctx);
+  var performance = CRM_STUDIO_FILE_CONFIG.performance;
+  var defaults = CRM_STUDIO_FILE_CONFIG.default_segments;
+  var defaultRows: Array<Record<string, unknown>> = [];
+  var missing = Array.isArray(inspection.missing_segment_keys) ? inspection.missing_segment_keys as string[] : [];
+  var drifted = Array.isArray(inspection.drifted_segment_keys) ? inspection.drifted_segment_keys as string[] : [];
+  for (var index = 0; index < defaults.length; index++) {
+    var state = missing.indexOf(defaults[index].key) >= 0 ? "missing" : drifted.indexOf(defaults[index].key) >= 0 ? "drifted" : "matched";
+    defaultRows.push({
+      key: defaults[index].key,
+      kind: defaults[index].kind,
+      group: defaults[index].group_key || "—",
+      state: state,
+      active: defaults[index].is_active ? "yes" : "no"
+    });
+  }
+  var defaultTable: TableBlock = {
+    type: "table",
+    block_id: "file_config_defaults_table",
+    columns: [
+      { key: "key", label: "Stable key", format: "code" },
+      { key: "kind", label: "Kind", format: "badge" },
+      { key: "group", label: "Group", format: "code" },
+      { key: "state", label: "Runtime state", format: "badge" },
+      { key: "active", label: "File active", format: "text" }
+    ],
+    rows: defaultRows,
+    page_action_id: "file_config_defaults_page",
+    empty_text: "The file contains no default runtime records."
+  };
+  var clean = inspection.deployment_status === "acknowledged" && inspection.runtime_status === "clean";
+  return {
+    blocks: [
+      { type: "header", text: "File-backed Configuration" },
+      {
+        type: "banner",
+        title: clean ? "File config loaded and runtime defaults match" : "File config review required",
+        description: "The bundled TypeScript manifest is the human-reviewed source of truth. Loading creates missing defaults and checkpoints the deployed fingerprint; it never overwrites drifted runtime records or history.",
+        variant: clean ? "default" : "alert"
+      },
+      {
+        type: "stats",
+        items: [
+          { label: "Config version", value: String(inspection.config_version || "—") },
+          { label: "Formula", value: String(inspection.formula_version || "—") },
+          { label: "Deploy status", value: String(inspection.deployment_status || "—") },
+          { label: "Runtime status", value: String(inspection.runtime_status || "—") },
+          { label: "Missing defaults", value: missing.length },
+          { label: "Drifted defaults", value: drifted.length }
+        ]
+      },
+      {
+        type: "fields",
+        fields: [
+          { label: "Source file", value: String(inspection.source_file || "—") },
+          { label: "Fingerprint", value: String(inspection.fingerprint || "—") },
+          { label: "Loaded at", value: String(inspection.loaded_at || "—") },
+          { label: "Activation minimum", value: String(CRM_STUDIO_FILE_CONFIG.activation_minimum_score) },
+          { label: "Overall weighting", value: Math.round(CRM_STUDIO_FILE_CONFIG.overall.readiness_weight * 100) + "% readiness / " + Math.round(CRM_STUDIO_FILE_CONFIG.overall.performance_weight * 100) + "% performance" },
+          { label: "Statistics window", value: String(CRM_STUDIO_FILE_CONFIG.statistics.score_run_window) + " latest runs" }
+        ]
+      },
+      { type: "divider" },
+      { type: "header", text: "Performance thresholds from file" },
+      {
+        type: "fields",
+        fields: [
+          { label: "Delivery target", value: displayValue(performance.delivery.target * 100, "%") },
+          { label: "Click target", value: displayValue(performance.click.target * 100, "%") },
+          { label: "Conversion target", value: displayValue(performance.conversion.target * 100, "%") },
+          { label: "Complaint warning / stop", value: displayValue(performance.complaint.warning_above * 100, "%") + " / " + displayValue(performance.complaint.stop_at * 100, "%") },
+          { label: "Unsubscribe warning / stop", value: displayValue(performance.unsubscribe.warning_above * 100, "%") + " / " + displayValue(performance.unsubscribe.stop_at * 100, "%") },
+          { label: "Default delivered sample", value: String(performance.default_minimum_sample_size) }
+        ]
+      },
+      { type: "divider" },
+      { type: "header", text: "File default records" },
+      defaultTable,
+      {
+        type: "actions",
+        elements: [
+          { type: "button", label: "Load file config", action_id: "load_file_config", style: "primary" },
+          { type: "button", label: "Refresh config status", action_id: "refresh_file_config", style: "secondary" }
+        ]
+      }
+    ]
+  };
+}
+
 async function buildEvents(ctx: CrmContext): Promise<BlockResponse> {
   var result = await ctx.storage.events.query({
     limit: READ_PAGE_LIMIT,
@@ -637,6 +901,9 @@ function buildSettings(): BlockResponse {
           { label: "Program upsert", value: "POST v1/programs/upsert" },
           { label: "Metric facts", value: "POST v1/metrics/ingest-batch" },
           { label: "Score evaluation", value: "POST v1/programs/evaluate" },
+          { label: "Statistics", value: "GET v1/statistics/summary" },
+          { label: "File config status", value: "GET v1/config/file/status" },
+          { label: "Load file config", value: "POST v1/config/file/load" },
           { label: "Delivery mode", value: "disabled" }
         ]
       },
@@ -856,6 +1123,8 @@ export async function handleAdmin(input: unknown, ctx: CrmContext): Promise<Bloc
     if (interaction.page === "/programs") return await buildPrograms(ctx);
     if (interaction.page === "/templates") return await buildTemplates(ctx);
     if (interaction.page === "/measurement") return await buildMeasurement(ctx);
+    if (interaction.page === "/statistics") return await buildStatistics(ctx);
+    if (interaction.page === "/configuration") return await buildConfiguration(ctx);
     if (interaction.page === "/events") return await buildEvents(ctx);
     if (interaction.page === "/migration") return await buildMigration(ctx);
     if (interaction.page === "/settings") return buildSettings();
@@ -864,6 +1133,18 @@ export async function handleAdmin(input: unknown, ctx: CrmContext): Promise<Bloc
 
   if (interaction.type === "block_action") {
     if (interaction.action_id === "refresh_dashboard") return await buildDashboard(ctx);
+    if (interaction.action_id === "refresh_statistics") return await buildStatistics(ctx);
+    if (interaction.action_id === "refresh_file_config") return await buildConfiguration(ctx);
+    if (interaction.action_id === "load_file_config") {
+      var configTimestamp = new Date().toISOString();
+      var configRequestId = "admin-file-config-" + Date.now();
+      var configResult = await serializeMutation(async function() {
+        return await loadFileConfig(ctx, configRequestId, configTimestamp, false);
+      });
+      var configBlocks = (await buildConfiguration(ctx)).blocks;
+      var configError = resultErrorMessage(configResult);
+      return configError ? toast(configError, "error", configBlocks) : toast("File config loaded; missing defaults created and drift preserved for review", "success", configBlocks);
+    }
     if (interaction.action_id === "migration_step" || interaction.action_id === "migration_restart") {
       var timestamp = new Date().toISOString();
       var migrationInput: JsonRecord = {
