@@ -54,6 +54,16 @@ ctx.http = {
   },
 };
 
+const disabledSend = await sendTrackedEmail(ctx, {
+  program_key: "weekly",
+  profile_id: "profile:one",
+  period_key: "2026-W28",
+}, "tracking-send-disabled-0001", timestamp, false);
+assert.equal(disabledSend.ok, false);
+assert.equal(disabledSend.error.code, "DELIVERY_DISABLED");
+assert.equal(await ctx.storage.emailDeliveries.count(), 0, "disabled delivery must not persist a delivery");
+await ctx.kv.set("settings:deliveryMode", "enabled");
+
 const sent = await sendTrackedEmail(ctx, {
   program_key: "weekly",
   profile_id: "profile:one",

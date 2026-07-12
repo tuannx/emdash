@@ -34,10 +34,16 @@ audience bounded context described by the Growth Studio specification.
   migration, events, and API integration.
 
 Bulk journeys remain disabled. CRM Studio exposes an explicit, private,
-per-recipient tracked-send route backed by Cloudflare Email Service REST; it
-does not request EmDash `email:send`. Every send re-checks profile eligibility,
+per-recipient tracked-send route backed by Cloudflare Email Service REST. Live
+delivery fails closed unless an operator explicitly sets `deliveryMode=enabled`;
+the plugin does not request the unused EmDash `email:send` capability. Every send re-checks profile eligibility,
 audience membership, suppressions, CRM blacklist, paid-TV exclusions, and
 active program/template state before contacting the provider.
+
+Tracked messages use `/crm-track/c`, `/crm-track/o`, and `/crm-track/u` URLs.
+The host application must expose those public HTTP wrappers and forward them to
+the plugin's public collector routes; the package intentionally does not add
+site-level Astro routes to the EmDash monorepo.
 
 ## Safety invariants
 

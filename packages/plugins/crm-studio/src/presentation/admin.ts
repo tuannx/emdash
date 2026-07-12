@@ -869,7 +869,7 @@ async function buildTracking(ctx: CrmContext): Promise<BlockResponse> {
       {
         type: "banner",
         title: configured ? "Cloudflare Email Service configured" : "Provider configuration incomplete",
-        description: "Opaque server-side links hide destinations, the 1x1 GIF records open observations, and Cloudflare delivery reports are matched fail-closed by recipient, exact subject, and send time. Open pixels are never treated as proof of a human read because privacy proxies can preload images.",
+        description: "Live delivery is disabled by default and must be enabled explicitly by an operator. Opaque server-side links hide destinations, the 1x1 GIF records open observations, and Cloudflare delivery reports are matched fail-closed by recipient, exact subject, and send time. Open pixels are never treated as proof of a human read because privacy proxies can preload images.",
         variant: configured ? "default" : "alert"
       },
       {

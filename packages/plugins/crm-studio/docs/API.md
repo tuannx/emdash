@@ -78,9 +78,16 @@ into sequenced requests.
 inactive configuration, ineligible profiles, nonmembers, suppressions,
 blacklist members, and paid-TV exclusions. It rewrites HTTPS links to opaque
 tokens, adds a 1x1 open pixel and one-click unsubscribe, then calls Cloudflare
-Email Service REST. The API token is never returned.
+Email Service REST. A non-dry-run request also requires
+`settings:deliveryMode=enabled`; the bootstrap default is `disabled`. The API
+token is never returned.
 
 ### Public tracking collectors
+
+These are plugin collector routes. A host application must expose public
+`/crm-track/c`, `/crm-track/o`, and `/crm-track/u` wrappers that dispatch to
+them and translate the result into redirects or the 1x1 GIF response. CRM
+Studio does not install site-level Astro routes automatically.
 
 The plugin routes `GET v1/tracking/open`, `GET v1/tracking/click`, and
 `GET|POST v1/tracking/unsubscribe` are public because email clients cannot

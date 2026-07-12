@@ -230,6 +230,7 @@ suppression gates at the last responsible moment.
    form responses, replacing the site-owned wrappers.
 6. Consent source/product/legal decisions from the Growth Studio source spec.
 
-Until those are complete, `deliveryMode=disabled` remains the boundary for bulk
-journeys and outbox dispatch. The private per-recipient tracked-send route is a
-separate bounded primitive and never scans an audience.
+Until those are complete, `deliveryMode=disabled` remains the default boundary
+for bulk journeys, outbox dispatch, and the private per-recipient tracked-send
+primitive. Dry-run rendering remains available while disabled. Enabling the
+bounded live primitive is an explicit operator action; it never scans an audience.

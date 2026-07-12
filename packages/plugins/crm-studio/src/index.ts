@@ -12,7 +12,7 @@ export function crmStudioPlugin(): PluginDescriptor {
     version: "0.1.0",
     format: "standard",
     entrypoint: "@aikit/crm-studio/sandbox",
-    capabilities: ["users:read", "network:fetch"],
+    capabilities: ["users:read", "network:request"],
     allowedHosts: ["api.cloudflare.com"],
     storage: {
       profiles: {

@@ -192,6 +192,10 @@ export async function sendTrackedEmail(
     created_at: occurredAt,
     updated_at: occurredAt
   };
+  var deliveryMode = await ctx.kv.get<string>("settings:deliveryMode");
+  if (!dryRun && deliveryMode !== "enabled") {
+    return apiError("DELIVERY_DISABLED", "Tracked email delivery is disabled until an operator explicitly enables it");
+  }
   var rendered = await renderTrackedMessage(ctx, delivery, template.body_html, template.body_text || "", trackingOrigin, !dryRun);
   if (dryRun) return apiSuccess({ delivery: delivery, preview: { subject: template.subject, html: rendered.html, text: rendered.text, tracked_links: rendered.links.length } });
   await ctx.storage.emailDeliveries.put(delivery.id, delivery);
@@ -262,7 +266,8 @@ export async function syncCloudflareReport(ctx: CrmContext, input: JsonRecord): 
   var zoneId = await ctx.kv.get<string>("settings:cloudflareZoneId");
   var apiToken = await ctx.kv.get<string>("settings:cloudflareApiToken");
   if (!zoneId || !apiToken || !ctx.http) return apiError("PROVIDER_REPORT_NOT_CONFIGURED", "Cloudflare zone ID, API token, and network capability are required");
-  var earliest = deliveries.items[deliveries.items.length - 1].data.sent_at || deliveries.items[deliveries.items.length - 1].data.created_at;
+  var oldestDelivery = deliveries.items[deliveries.items.length - 1].data;
+  var earliest = oldestDelivery.sent_at || oldestDelivery.created_at;
   var minimum = Date.now() - 31 * 24 * 60 * 60 * 1000;
   if (Date.parse(earliest) < minimum) earliest = new Date(minimum).toISOString();
   var query = "query CrmEmailEvents($zoneTag: string!, $start: Time!, $end: Time!) { viewer { zones(filter: { zoneTag: $zoneTag }) { emailSendingAdaptive(filter: { datetime_geq: $start, datetime_leq: $end }, limit: 500, orderBy: [datetime_DESC]) { datetime to subject status messageId errorCause errorDetail isLastEvent } } } }";

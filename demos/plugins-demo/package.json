@@ -11,6 +11,7 @@
     "typecheck": "astro check"
   },
   "dependencies": {
+	"@aikit/crm-studio": "workspace:*",
     "@astrojs/node": "catalog:",
     "@astrojs/react": "catalog:",
     "@emdash-cms/plugin-api-test": "workspace:*",

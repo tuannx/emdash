@@ -1,3 +1,4 @@
+import { crmStudioPlugin } from "@aikit/crm-studio";
 import node from "@astrojs/node";
 import react from "@astrojs/react";
 import { apiTestPlugin } from "@emdash-cms/plugin-api-test";
@@ -32,6 +33,9 @@ export default defineConfig({
 
 				// 4. API Test plugin - exercises all v2 APIs
 				apiTestPlugin(),
+
+				// 5. CRM Studio - profiles, segments, scoring, and measurement
+				crmStudioPlugin(),
 			],
 		}),
 	],
