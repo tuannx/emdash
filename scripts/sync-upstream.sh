@@ -84,12 +84,30 @@ done
 echo ""
 echo "=== AIKIT SITE VERSION GAP ==="
 AIKIT_SITE="/Users/tuannguyen/Projects/AIKitLLC/EmDash"
+AIKIT_BASELINE="backup/plugin-studio-main-before-remote-fix-20260712"
+read_dependency() {
+  node -e "const fs=require('node:fs'); const p=JSON.parse(fs.readFileSync(0, 'utf8')); console.log(p.dependencies?.[process.argv[1]] ?? '')" "$1"
+}
 if [ -f "$AIKIT_SITE/package.json" ]; then
-  CURRENT_EMDASH=$(node -e "const p=require('${AIKIT_SITE}/package.json'); console.log(p.dependencies.emdash)")
-  CURRENT_CLOUDFLARE=$(node -e "const p=require('${AIKIT_SITE}/package.json'); console.log(p.dependencies['@emdash-cms/cloudflare'])")
-  echo "emdash (site):          $CURRENT_EMDASH"
+  CURRENT_EMDASH=$(read_dependency "emdash" < "$AIKIT_SITE/package.json")
+  CURRENT_CLOUDFLARE=$(read_dependency "@emdash-cms/cloudflare" < "$AIKIT_SITE/package.json")
+  VERSION_SOURCE="current site"
+
+  # The current checkout may be the in-progress workspace port rather than the
+  # deployed site. Fall back to the documented last pinned deployment baseline.
+  if [ -z "$CURRENT_EMDASH" ] || [ "$CURRENT_EMDASH" = "workspace:*" ]; then
+    BASELINE_PACKAGE=$(git -C "$AIKIT_SITE" show "$AIKIT_BASELINE:package.json" 2>/dev/null || true)
+    if [ -n "$BASELINE_PACKAGE" ]; then
+      CURRENT_EMDASH=$(printf '%s' "$BASELINE_PACKAGE" | read_dependency "emdash")
+      CURRENT_CLOUDFLARE=$(printf '%s' "$BASELINE_PACKAGE" | read_dependency "@emdash-cms/cloudflare")
+      VERSION_SOURCE="last pinned site baseline ($AIKIT_BASELINE)"
+    fi
+  fi
+
+  echo "version source:         $VERSION_SOURCE"
+  echo "emdash (site):          ${CURRENT_EMDASH:-unknown}"
   echo "emdash (latest):        $(git tag -l 'emdash@*' --sort=-version:refname | head -1 2>/dev/null | sed 's/emdash@//')"
-  echo "@emdash-cms/cloudflare (site): $CURRENT_CLOUDFLARE"
+  echo "@emdash-cms/cloudflare (site): ${CURRENT_CLOUDFLARE:-unknown}"
   echo "@emdash-cms/cloudflare (latest): $(git tag -l '@emdash-cms/cloudflare@*' --sort=-version:refname | head -1 2>/dev/null | sed 's/@emdash-cms\/cloudflare@//')"
 fi
 
