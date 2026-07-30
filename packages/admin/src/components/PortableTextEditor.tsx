@@ -48,6 +48,8 @@ import {
 	TextItalic,
 	TextUnderline,
 	TextStrikethrough,
+	TextSubscript,
+	TextSuperscript,
 	Code,
 	TextHOne,
 	TextHTwo,
@@ -91,6 +93,8 @@ import { Extension, type Range } from "@tiptap/core";
 import CharacterCount from "@tiptap/extension-character-count";
 import Focus from "@tiptap/extension-focus";
 import Placeholder from "@tiptap/extension-placeholder";
+import Subscript from "@tiptap/extension-subscript";
+import Superscript from "@tiptap/extension-superscript";
 import { Table } from "@tiptap/extension-table";
 import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
@@ -1055,6 +1059,12 @@ function convertPTMarks(marks: string[], markDefs: Map<string, PortableTextMarkD
 				break;
 			case "strike-through":
 				pmMarks.push({ type: "strike" });
+				break;
+			case "subscript":
+				pmMarks.push({ type: "subscript" });
+				break;
+			case "superscript":
+				pmMarks.push({ type: "superscript" });
 				break;
 			case "code":
 				pmMarks.push({ type: "code" });
@@ -2539,7 +2549,7 @@ export function PortableTextEditor({
 					openOnClick: false,
 					enableClickSelection: true,
 					HTMLAttributes: {
-						class: "text-kumo-brand underline",
+						class: "text-kumo-link underline",
 					},
 				},
 				underline: {},
@@ -2550,7 +2560,10 @@ export function PortableTextEditor({
 			ImageExtension,
 			MarkdownLinkExtension,
 			PluginBlockExtension,
+			Subscript,
+			Superscript,
 			Table.configure({
+				allowTableNodeSelection: true,
 				resizable: true,
 			}),
 			TableRow,
@@ -3145,6 +3158,8 @@ function EditorBubbleMenu({
 			italic: activeEditor.isActive("italic"),
 			underline: activeEditor.isActive("underline"),
 			strike: activeEditor.isActive("strike"),
+			subscript: activeEditor.isActive("subscript"),
+			superscript: activeEditor.isActive("superscript"),
 			code: activeEditor.isActive("code"),
 			link: activeEditor.isActive("link"),
 		}),
@@ -3284,6 +3299,20 @@ function EditorBubbleMenu({
 						title={t`Strikethrough`}
 					>
 						<TextStrikethrough className="h-4 w-4" />
+					</BubbleButton>
+					<BubbleButton
+						onClick={() => editor.chain().focus().toggleSubscript().run()}
+						active={activeMarks.subscript}
+						title={t`Subscript`}
+					>
+						<TextSubscript className="h-4 w-4" />
+					</BubbleButton>
+					<BubbleButton
+						onClick={() => editor.chain().focus().toggleSuperscript().run()}
+						active={activeMarks.superscript}
+						title={t`Superscript`}
+					>
+						<TextSuperscript className="h-4 w-4" />
 					</BubbleButton>
 					<BubbleButton
 						onClick={() => editor.chain().focus().toggleCode().run()}
@@ -3518,6 +3547,8 @@ function EditorToolbar({
 				isItalic: ctx.editor.isActive("italic"),
 				isUnderline: ctx.editor.isActive("underline"),
 				isStrike: ctx.editor.isActive("strike"),
+				isSubscript: ctx.editor.isActive("subscript"),
+				isSuperscript: ctx.editor.isActive("superscript"),
 				isCode: ctx.editor.isActive("code"),
 				isBulletList: ctx.editor.isActive("bulletList"),
 				isOrderedList: ctx.editor.isActive("orderedList"),
@@ -3670,6 +3701,20 @@ function EditorToolbar({
 					title={t`Strikethrough`}
 				>
 					<TextStrikethrough className="h-4 w-4" aria-hidden="true" />
+				</ToolbarButton>
+				<ToolbarButton
+					onClick={() => editor.chain().focus().toggleSubscript().run()}
+					active={editorState.isSubscript}
+					title={t`Subscript`}
+				>
+					<TextSubscript className="h-4 w-4" aria-hidden="true" />
+				</ToolbarButton>
+				<ToolbarButton
+					onClick={() => editor.chain().focus().toggleSuperscript().run()}
+					active={editorState.isSuperscript}
+					title={t`Superscript`}
+				>
+					<TextSuperscript className="h-4 w-4" aria-hidden="true" />
 				</ToolbarButton>
 				<ToolbarButton
 					onClick={() => editor.chain().focus().toggleCode().run()}
