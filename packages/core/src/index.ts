@@ -510,6 +510,7 @@ export type {
 
 // Search
 export {
+	SEARCH_TOKENIZERS,
 	FTSManager,
 	search,
 	searchWithDb,
@@ -521,6 +522,7 @@ export {
 } from "./search/index.js";
 export type {
 	SearchConfig,
+	SearchTokenizer,
 	SearchOptions,
 	CollectionSearchOptions,
 	SearchResult,
