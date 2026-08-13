@@ -231,6 +231,10 @@ export {
 	NoopSandboxRunner,
 	SandboxNotAvailableError,
 	SandboxUnavailableError,
+	createSandboxRouteError,
+	createSandboxRouteErrorEnvelope,
+	getSandboxRouteErrorDetails,
+	getSandboxRouteErrorEnvelope,
 	createNoopSandboxRunner,
 	// HTTP access for plugins (shared between in-process, Cloudflare, and workerd runners)
 	createHttpAccess,
@@ -300,6 +304,9 @@ export type {
 	PluginManifest,
 	ValidatedPluginManifest,
 	SerializedRequest,
+	SandboxRouteErrorCode,
+	SandboxRouteErrorDetails,
+	SandboxRouteErrorEnvelope,
 } from "./plugins/index.js";
 
 // Capability normalization (legacy → canonical alias layer)
@@ -550,4 +557,7 @@ export type {
 	SqliteConfig,
 	LibsqlConfig,
 	PostgresConfig,
+	CollectionDeletionGuardInput,
+	CollectionDeletionGuardResult,
+	ExecuteCollectionDeletionGuard,
 } from "./db/adapters.js";

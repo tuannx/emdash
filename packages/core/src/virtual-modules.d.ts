@@ -35,6 +35,7 @@ declare module "virtual:emdash/dialect" {
 	import type { Dialect, Kysely } from "kysely";
 
 	import type { DatabaseDialectType } from "./db/adapters.js";
+	import type { ExecuteCollectionDeletionGuard } from "./db/adapters.js";
 
 	// Can be undefined if no database configured, or the actual function
 	export const createDialect: ((config: unknown) => Dialect) | undefined;
@@ -82,6 +83,7 @@ declare module "virtual:emdash/dialect" {
 		close?: () => void;
 	}
 	export const createRequestScopedDb: (opts: RequestScopedDbOpts) => RequestScopedDb | null;
+	export const executeCollectionDeletionGuard: ExecuteCollectionDeletionGuard | undefined;
 }
 
 declare module "virtual:emdash/storage" {
@@ -176,6 +178,16 @@ declare module "virtual:emdash/env" {
 	 * where callers should fall back to `import.meta.env`.
 	 */
 	export const env: Record<string, unknown> | undefined;
+}
+
+declare module "virtual:emdash/build" {
+	/**
+	 * Epoch milliseconds at which this build's virtual modules were generated.
+	 * Folded into the route cache validator so a code-only deploy — which
+	 * renames `/_astro/*` without touching content — still invalidates HTML a
+	 * browser cached from an earlier deployment.
+	 */
+	export const buildTime: number;
 }
 
 declare module "virtual:emdash/scheduler" {
