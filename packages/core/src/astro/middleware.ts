@@ -40,8 +40,15 @@ import {
 	isInstrumentationEnabled,
 } from "../database/instrumentation.js";
 import {
+	PendingMigrationsError,
+	resolveRuntimeMigrationMode,
+	type RuntimeMigrationMode,
+} from "../database/migrations/policy.js";
+import { createDeferredTaskTracker } from "../deferred-tasks.js";
+import {
 	DB_INIT_DEADLINE_MS,
 	EmDashRuntime,
+	type MediaUsageMaintenanceResult,
 	type RuntimeDependencies,
 	type SandboxedPluginEntry,
 	type MediaProviderEntry,
@@ -68,6 +75,7 @@ import {
 	ASTRO_COOKIES_SYMBOL,
 	coordinateScopedDbLifecycle,
 	finishScoped,
+	requestEndedAuthenticated,
 } from "./middleware/scoped-db.js";
 import { wrapBodyForStreamMetrics } from "./middleware/stream-end-metrics.js";
 import { prefetchLayoutData } from "./prefetch.js";
@@ -190,7 +198,10 @@ function getPlugins(): ResolvedPlugin[] {
 /**
  * Build runtime dependencies from virtual modules
  */
-function buildDependencies(config: EmDashConfig): RuntimeDependencies {
+function buildDependencies(
+	config: EmDashConfig,
+	migrationMode: RuntimeMigrationMode,
+): RuntimeDependencies {
 	/* eslint-disable typescript-eslint/no-unsafe-type-assertion --
 	   The virtual:emdash/* imports above use @ts-ignore because tsgo/IDE
 	   resolution can't see virtual-modules.d.ts in every consumer setup,
@@ -200,6 +211,7 @@ function buildDependencies(config: EmDashConfig): RuntimeDependencies {
 	const sandboxModule = virtualSandboxRunnerModule as Record<string, unknown>;
 	return {
 		config,
+		migrationMode,
 		plugins: getPlugins(),
 		createDialect: virtualCreateDialect as (config: Record<string, unknown>) => unknown,
 		// Optional: only batching backends (D1, DO) export this; undefined otherwise.
@@ -227,6 +239,7 @@ function buildDependencies(config: EmDashConfig): RuntimeDependencies {
  */
 async function getRuntime(
 	config: EmDashConfig,
+	migrationMode: RuntimeMigrationMode,
 	initTimings?: Array<{ name: string; dur: number; desc?: string }>,
 ): Promise<EmDashRuntime> {
 	// Waiters poll rather than awaiting the initializing request's promise —
@@ -241,7 +254,7 @@ async function getRuntime(
 		holder.lock,
 		() => holder.instance,
 		async (isCurrentClaim) => {
-			const deps = buildDependencies(config);
+			const deps = buildDependencies(config, migrationMode);
 			const runtime = await EmDashRuntime.create(deps, initTimings);
 			if (isCurrentClaim()) {
 				holder.instance = runtime;
@@ -285,6 +298,12 @@ export async function runScheduledTasks(
 	const config = getConfig();
 	if (!config) return { published: [] };
 	return runOutsideRequest(config, (runtime) => runtime.runScheduledTasks(options));
+}
+
+export async function runScheduledMediaUsageTasks(): Promise<MediaUsageMaintenanceResult> {
+	const config = getConfig();
+	if (!config) return { outcome: "inactive", taskClass: null, turn: null };
+	return runOutsideRequest(config, (runtime) => runtime.runScheduledMediaUsageTasks());
 }
 
 /**
@@ -352,8 +371,36 @@ async function runOutsideRequest<T>(
 	config: EmDashConfig,
 	fn: (runtime: EmDashRuntime) => Promise<T>,
 ): Promise<T> {
-	const runtime = await getRuntime(config);
+	const migrationMode = resolveConfiguredMigrationMode(config);
+	if (getRequestContext()) {
+		const runtime = await getRuntime(config, migrationMode);
+		return runOutsideRequestWithRuntime(config, runtime, fn);
+	}
 
+	const deferredTasks = createDeferredTaskTracker(() => {});
+	const context = {
+		editMode: false,
+		metrics: createRequestMetrics(performance.now()),
+		deferredTasks,
+	};
+	return runWithContext(context, async () => {
+		const runtime = await (async () => {
+			try {
+				return await getRuntime(config, migrationMode);
+			} finally {
+				deferredTasks.settle();
+				await deferredTasks.settled;
+			}
+		})();
+		return runOutsideRequestWithRuntime(config, runtime, fn);
+	});
+}
+
+async function runOutsideRequestWithRuntime<T>(
+	config: EmDashConfig,
+	runtime: EmDashRuntime,
+	fn: (runtime: EmDashRuntime) => Promise<T>,
+): Promise<T> {
 	const scoped = createRequestScopedDb({
 		config: config.database?.config,
 		isAuthenticated: false,
@@ -416,6 +463,31 @@ const NOOP_COOKIE_JAR = {
  * that path, so the value is never used — it exists to satisfy the contract.
  */
 const CRON_EVENT_URL = new URL("https://cron.emdash.internal/");
+
+function resolveConfiguredMigrationMode(config: EmDashConfig): RuntimeMigrationMode {
+	const processOverride =
+		typeof process !== "undefined" && process.env ? process.env.EMDASH_MIGRATIONS_MODE : undefined;
+	const importMetaOverride = import.meta.env.EMDASH_MIGRATIONS_MODE;
+	return resolveRuntimeMigrationMode(config.migrations, {
+		dev: import.meta.env.DEV,
+		override: processOverride ?? importMetaOverride,
+	});
+}
+
+function pendingMigrationsResponse(error: PendingMigrationsError): Response {
+	console.error("[emdash] database migrations are pending:", error.pending.join(", "));
+	return migrationRequiredResponse();
+}
+
+function migrationRequiredResponse(): Response {
+	return new Response(
+		"Database migrations are required. Apply the deployment migration manifest and retry.",
+		{
+			status: 503,
+			headers: { "Retry-After": "60" },
+		},
+	);
+}
 
 /**
  * Baseline security headers applied to all responses.
@@ -566,6 +638,8 @@ export const onRequest = defineMiddleware(async (context, next) => {
 	const metrics = createRequestMetrics(performance.now());
 
 	const run = async (): Promise<Response> => {
+		const config = getConfig();
+		const migrationMode = config ? resolveConfiguredMigrationMode(config) : "auto";
 		// Process /_emdash routes and public routes with an active session
 		// (logged-in editors need the runtime for toolbar/visual editing on public pages)
 		const isEmDashRoute = url.pathname.startsWith("/_emdash");
@@ -608,6 +682,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
 			.startsWith("bearer ");
 		const isWrite = request.method !== "GET" && request.method !== "HEAD";
 		const isAuthenticated = !!sessionUser || hasBearerAuth;
+		const endedAuthenticated = () => requestEndedAuthenticated(isAuthenticated, cookies);
 		const canUseCachedBinding =
 			!isAuthenticated &&
 			!isWrite &&
@@ -633,7 +708,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
 				// production. The build database is legitimately empty in CI and there
 				// is no live visitor to send to the wizard at build time (session reads
 				// are already skipped for prerender above for the same reason).
-				if (!isSetupVerified() && !context.isPrerendered) {
+				if (migrationMode === "auto" && !isSetupVerified() && !context.isPrerendered) {
 					const t0 = performance.now();
 					try {
 						const { getDb } = await import("../loader.js");
@@ -660,14 +735,13 @@ export const onRequest = defineMiddleware(async (context, next) => {
 				// The runtime is a cached singleton — after the first request,
 				// getRuntime() is just a null-check. This enables SEO plugins to
 				// contribute meta tags for all visitors, not just logged-in editors.
-				const config = getConfig();
 				if (config) {
 					// Sub-phase timings are populated only on the cold init. Warm
 					// requests hit the cached runtime and leave this empty.
 					const initSubTimings: Array<{ name: string; dur: number; desc?: string }> = [];
 					const t0 = performance.now();
 					try {
-						const runtime = await getRuntime(config, initSubTimings);
+						const runtime = await getRuntime(config, migrationMode, initSubTimings);
 						markSetupVerified();
 						const handlePublicPluginApiRoute = createPublicPluginApiRouteHandler(runtime);
 						// eslint-disable-next-line typescript/no-unsafe-type-assertion -- partial object; getPageRuntime() only checks for the page-contribution methods
@@ -682,6 +756,16 @@ export const onRequest = defineMiddleware(async (context, next) => {
 							storage: runtime.storage,
 						} as EmDashHandlers;
 					} catch (error) {
+						if (error instanceof PendingMigrationsError) {
+							return pendingMigrationsResponse(error);
+						}
+						if (migrationMode === "manual" && isMissingTableError(error)) {
+							console.error(
+								"[emdash] database schema is unavailable in manual migration mode:",
+								error,
+							);
+							return migrationRequiredResponse();
+						}
 						// Non-fatal — EmDashHead falls back to base SEO contributions —
 						// but log it (throttled): a persistently failing init (e.g. a
 						// failing migration, #1744) is otherwise invisible on the
@@ -708,6 +792,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
 				const anonScoped = createRequestScopedDb({
 					config: config?.database?.config,
 					isAuthenticated,
+					endedAuthenticated,
 					isWrite,
 					canUseCachedBinding,
 					cookies,
@@ -761,7 +846,6 @@ export const onRequest = defineMiddleware(async (context, next) => {
 			}
 		}
 
-		const config = getConfig();
 		if (!config) {
 			console.error("EmDash: No configuration found");
 			return finalizeResponse(await next());
@@ -781,14 +865,14 @@ export const onRequest = defineMiddleware(async (context, next) => {
 				// instance and `initSubTimings` stays empty.
 				const initSubTimings: Array<{ name: string; dur: number; desc?: string }> = [];
 				let t0 = performance.now();
-				const runtime = await getRuntime(config, initSubTimings);
+				const runtime = await getRuntime(config, migrationMode, initSubTimings);
 				timings.push({ name: "rt", dur: performance.now() - t0, desc: "Runtime init" });
 				// Forward any sub-phase samples so cold-start breakdown is visible
 				// in Server-Timing. Each phase appears prefixed "rt." to distinguish
 				// from the aggregate "rt" timing above.
 				for (const sub of initSubTimings) timings.push(sub);
 
-				// Runtime init runs migrations, so the DB is guaranteed set up
+				// Runtime initialization has satisfied the effective migration policy.
 				markSetupVerified();
 
 				// The manifest is no longer pre-loaded here. It's admin-only
@@ -907,6 +991,13 @@ export const onRequest = defineMiddleware(async (context, next) => {
 					setPluginStatus: runtime.setPluginStatus.bind(runtime),
 				};
 			} catch (error) {
+				if (error instanceof PendingMigrationsError) {
+					return pendingMigrationsResponse(error);
+				}
+				if (migrationMode === "manual" && isMissingTableError(error)) {
+					console.error("[emdash] database schema is unavailable in manual migration mode:", error);
+					return migrationRequiredResponse();
+				}
 				console.error("EmDash middleware error:", error);
 			}
 
@@ -921,6 +1012,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
 			const scoped = createRequestScopedDb({
 				config: config?.database?.config,
 				isAuthenticated,
+				endedAuthenticated,
 				isWrite,
 				canUseCachedBinding,
 				cookies: context.cookies,
