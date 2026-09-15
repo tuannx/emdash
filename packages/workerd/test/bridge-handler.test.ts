@@ -32,6 +32,7 @@ async function setupTables(db: Kysely<any>) {
 		.addColumn("collection", "text", (col) => col.notNull())
 		.addColumn("id", "text", (col) => col.notNull())
 		.addColumn("data", "text", (col) => col.notNull())
+		.addColumn("revision", "text", (col) => col.notNull().defaultTo("0"))
 		.addColumn("created_at", "text", (col) => col.notNull())
 		.addColumn("updated_at", "text", (col) => col.notNull())
 		.addPrimaryKeyConstraint("pk_plugin_storage", ["plugin_id", "collection", "id"])
@@ -77,13 +78,14 @@ describe("Bridge Handler Conformance", () => {
 	});
 
 	function makeHandler(opts: {
+		pluginId?: string;
 		capabilities?: string[];
 		allowedHosts?: string[];
 		storageCollections?: string[];
 		beforeContentWrite?: () => Promise<void>;
 	}) {
 		return createBridgeHandler({
-			pluginId: "test-plugin",
+			pluginId: opts.pluginId ?? "test-plugin",
 			version: "1.0.0",
 			capabilities: opts.capabilities ?? [],
 			allowedHosts: opts.allowedHosts ?? [],
@@ -175,6 +177,213 @@ describe("Bridge Handler Conformance", () => {
 			const resultA = await call(handlerA, "kv/get", { key: "secret" });
 			expect(resultA.result).toBe("a-data");
 		});
+	});
+
+	describe.each(["kv", "storage"] as const)("%s conditional operations", (kind) => {
+		const keyFields = (key: string) =>
+			kind === "kv" ? { key } : { collection: "records", id: key };
+		const valueFields = (value: unknown) => (kind === "kv" ? { value } : { data: value });
+		const writeMethod = kind === "kv" ? "set" : "put";
+
+		async function readRevision(handler: ReturnType<typeof makeHandler>, key: string) {
+			const result = await call(handler, `${kind}/getVersioned`, keyFields(key));
+			const value = result.result;
+			if (
+				!value ||
+				typeof value !== "object" ||
+				!("revision" in value) ||
+				typeof value.revision !== "string"
+			) {
+				throw new Error(`Expected a versioned value: ${JSON.stringify(result)}`);
+			}
+			return value.revision;
+		}
+
+		it("allows one concurrent creator, replacement, and deletion for an exact key", async () => {
+			const handler = makeHandler({ storageCollections: ["records"] });
+			const create = await Promise.all(
+				["first", "second"].map((value) =>
+					call(handler, `${kind}/compareAndSet`, {
+						...keyFields("job"),
+						expectedRevision: null,
+						...valueFields(value),
+					}),
+				),
+			);
+			expect(
+				create.filter(
+					(result) =>
+						result.result &&
+						typeof result.result === "object" &&
+						"applied" in result.result &&
+						result.result.applied === true,
+				),
+			).toHaveLength(1);
+			const revision = await readRevision(handler, "job");
+			const replace = await Promise.all(
+				["next", "later"].map((value) =>
+					call(handler, `${kind}/compareAndSet`, {
+						...keyFields("job"),
+						expectedRevision: revision,
+						...valueFields(value),
+					}),
+				),
+			);
+			expect(
+				replace.filter(
+					(result) =>
+						result.result &&
+						typeof result.result === "object" &&
+						"applied" in result.result &&
+						result.result.applied === true,
+				),
+			).toHaveLength(1);
+			const updatedRevision = await readRevision(handler, "job");
+			expect(updatedRevision).not.toBe(revision);
+			const remove = await Promise.all(
+				[0, 1].map(() =>
+					call(handler, `${kind}/compareAndDelete`, {
+						...keyFields("job"),
+						expectedRevision: updatedRevision,
+					}),
+				),
+			);
+			expect(remove).toContainEqual({ result: { applied: true } });
+			expect(remove).toContainEqual({ result: { applied: false } });
+			expect(await call(handler, `${kind}/getVersioned`, keyFields("job"))).toEqual({
+				result: null,
+			});
+			await call(handler, `${kind}/compareAndSet`, {
+				...keyFields("job"),
+				expectedRevision: null,
+				...valueFields(null),
+			});
+			expect(await readRevision(handler, "job")).not.toBe(updatedRevision);
+			expect(
+				await call(handler, `${kind}/compareAndDelete`, {
+					...keyFields("job"),
+					expectedRevision: updatedRevision,
+				}),
+			).toEqual({ result: { applied: false } });
+			expect(await call(handler, `${kind}/getVersioned`, keyFields("job"))).toEqual({
+				result: { value: null, revision: expect.any(String) },
+			});
+		});
+
+		it("invalidates a revision after an ordinary same-value write", async () => {
+			const handler = makeHandler({ storageCollections: ["records"] });
+			await call(handler, `${kind}/${writeMethod}`, {
+				...keyFields("settings"),
+				...valueFields(false),
+			});
+			const revision = await readRevision(handler, "settings");
+			await call(handler, `${kind}/${writeMethod}`, {
+				...keyFields("settings"),
+				...valueFields(false),
+			});
+			expect(await readRevision(handler, "settings")).not.toBe(revision);
+			expect(
+				await call(handler, `${kind}/compareAndSet`, {
+					...keyFields("settings"),
+					expectedRevision: revision,
+					...valueFields(true),
+				}),
+			).toEqual({ result: { applied: false } });
+		});
+
+		it("rejects invalid keys, revisions, and oversized values without writing", async () => {
+			const handler = makeHandler({ storageCollections: ["records"] });
+			for (const key of ["", "x".repeat(1025)]) {
+				expect((await call(handler, `${kind}/getVersioned`, keyFields(key))).error).toBeDefined();
+			}
+			for (const expectedRevision of [undefined, 1, {}, "", "r".repeat(129)]) {
+				expect(
+					(
+						await call(handler, `${kind}/compareAndSet`, {
+							...keyFields("invalid"),
+							expectedRevision,
+							...valueFields("value"),
+						})
+					).error,
+				).toBeDefined();
+			}
+			expect(
+				(
+					await call(handler, `${kind}/compareAndDelete`, {
+						...keyFields("invalid"),
+						expectedRevision: null,
+					})
+				).error,
+			).toBeDefined();
+			expect(
+				(
+					await call(handler, `${kind}/compareAndSet`, {
+						...keyFields("invalid"),
+						expectedRevision: null,
+						...valueFields("x".repeat(1024 * 1024)),
+					})
+				).error,
+			).toBeDefined();
+			expect(await call(handler, `${kind}/getVersioned`, keyFields("invalid"))).toEqual({
+				result: null,
+			});
+		});
+
+		it("keeps revisions scoped to the authenticated plugin and exact key", async () => {
+			const handler = makeHandler({ storageCollections: ["records"] });
+			const other = makeHandler({ pluginId: "other-plugin", storageCollections: ["records"] });
+			for (const target of [handler, other]) {
+				await call(target, `${kind}/${writeMethod}`, {
+					...keyFields("shared"),
+					...valueFields("original"),
+				});
+			}
+			const revision = await readRevision(handler, "shared");
+			expect(
+				await call(other, `${kind}/compareAndSet`, {
+					...keyFields("shared"),
+					pluginId: "test-plugin",
+					expectedRevision: revision,
+					...valueFields("changed"),
+				}),
+			).toEqual({ result: { applied: false } });
+			expect(
+				await call(handler, `${kind}/compareAndSet`, {
+					...keyFields("different"),
+					expectedRevision: revision,
+					...valueFields("changed"),
+				}),
+			).toEqual({ result: { applied: false } });
+			expect(await call(other, `${kind}/get`, keyFields("shared"))).toEqual({ result: "original" });
+		});
+	});
+
+	it("guards declared collections for all conditional operations and advances bulk-write revisions", async () => {
+		const handler = makeHandler({ storageCollections: ["records"] });
+		for (const method of ["getVersioned", "compareAndSet", "compareAndDelete"]) {
+			expect(
+				(
+					await call(handler, `storage/${method}`, {
+						collection: "undeclared",
+						id: "job",
+						expectedRevision: null,
+						data: "value",
+					})
+				).error,
+			).toContain("Storage collection not declared");
+		}
+		await call(handler, "storage/put", { collection: "records", id: "job", data: 0 });
+		const before = await call(handler, "storage/getVersioned", {
+			collection: "records",
+			id: "job",
+		});
+		await call(handler, "storage/putMany", {
+			collection: "records",
+			items: [{ id: "job", data: 0 }],
+		});
+		const after = await call(handler, "storage/getVersioned", { collection: "records", id: "job" });
+		expect(after.result).toMatchObject({ value: 0, revision: expect.any(String) });
+		expect(after.result).not.toEqual(before.result);
 	});
 
 	// ── Capability Enforcement ────────────────────────────────────────────
@@ -394,6 +603,37 @@ describe("Bridge Handler Conformance", () => {
 			expect(result.error).toContain("Missing capability: network:fetch");
 		});
 
+		it("blocks private network targets before dispatch", async () => {
+			const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok"));
+
+			try {
+				const handler = makeHandler({ capabilities: ["network:fetch"], allowedHosts: ["*"] });
+				const result = await call(handler, "http/fetch", {
+					url: "http://127.0.0.1/internal",
+				});
+				expect(result.error).toContain("URLs targeting non-public IP addresses are not allowed");
+				expect(fetchSpy).not.toHaveBeenCalled();
+			} finally {
+				fetchSpy.mockRestore();
+			}
+		});
+
+		it.each(["http://[::]/internal", "http://100.100.100.200/internal"])(
+			"blocks non-public network target %s before dispatch",
+			async (url) => {
+				const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok"));
+
+				try {
+					const handler = makeHandler({ capabilities: ["network:fetch"], allowedHosts: ["*"] });
+					const result = await call(handler, "http/fetch", { url });
+					expect(result.error).toContain("URLs targeting non-public IP addresses are not allowed");
+					expect(fetchSpy).not.toHaveBeenCalled();
+				} finally {
+					fetchSpy.mockRestore();
+				}
+			},
+		);
+
 		it("rejects email send without email:send capability", async () => {
 			const handler = makeHandler({ capabilities: [] });
 			const result = await call(handler, "email/send", {
@@ -406,6 +646,74 @@ describe("Bridge Handler Conformance", () => {
 	// ── Storage (document store) ──────────────────────────────────────────
 
 	describe("plugin storage", () => {
+		it("applies guarded writes only within the trusted plugin and collection", async () => {
+			const handler = makeHandler({ storageCollections: ["records"] });
+			const rows = [
+				{ plugin_id: "test-plugin", collection: "records" },
+				{ plugin_id: "test-plugin", collection: "other" },
+				{ plugin_id: "other-plugin", collection: "records" },
+			];
+			for (const row of rows) {
+				await db
+					.insertInto("_plugin_storage")
+					.values({
+						...row,
+						id: "constructor",
+						data: '{"state":"ready"}',
+						created_at: "2026-01-01",
+						updated_at: "2026-01-01",
+					})
+					.execute();
+			}
+			expect(
+				await call(handler, "storage/updateIf", {
+					pluginId: "other-plugin",
+					collection: "records",
+					id: "constructor",
+					args: { where: { state: "ready" }, set: { state: "running" } },
+				}),
+			).toEqual({ result: { applied: true, data: { state: "running" } } });
+			for (const row of rows) {
+				const current = await db
+					.selectFrom("_plugin_storage")
+					.select("data")
+					.where("plugin_id", "=", row.plugin_id)
+					.where("collection", "=", row.collection)
+					.where("id", "=", "constructor")
+					.executeTakeFirstOrThrow();
+				expect(JSON.parse(current.data)).toEqual({
+					state:
+						row.plugin_id === "test-plugin" && row.collection === "records" ? "running" : "ready",
+				});
+			}
+		});
+
+		it("rejects guarded writes to undeclared collections", async () => {
+			const handler = makeHandler({ storageCollections: ["records"] });
+			const result = await call(handler, "storage/updateIf", {
+				collection: "other",
+				id: "item",
+				args: { where: {}, set: { state: "running" } },
+			});
+			expect(result.error).toContain("Storage collection not declared: other");
+		});
+
+		it.each([
+			null,
+			{ where: [], set: { stock: 100 } },
+			{ where: { stock: {} }, set: { stock: 100 } },
+		])("rejects malformed guarded writes without changing the record: %s", async (args) => {
+			const handler = makeHandler({ storageCollections: ["records"] });
+			await call(handler, "storage/put", { collection: "records", id: "item", data: { stock: 2 } });
+			expect(
+				(await call(handler, "storage/updateIf", { collection: "records", id: "item", args }))
+					.error,
+			).toBeTypeOf("string");
+			expect(
+				(await call(handler, "storage/get", { collection: "records", id: "item" })).result,
+			).toEqual({ stock: 2 });
+		});
+
 		it("rejects access to undeclared storage collection", async () => {
 			const handler = makeHandler({ storageCollections: ["logs"] });
 			const result = await call(handler, "storage/get", {

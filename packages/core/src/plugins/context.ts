@@ -9,6 +9,7 @@ import type { Kysely } from "kysely";
 import { ulid } from "ulidx";
 
 import { ContentRepository } from "../database/repositories/content.js";
+import { EntryLockRepository } from "../database/repositories/entry-locks.js";
 import { MediaRepository } from "../database/repositories/media.js";
 import { OptionsRepository } from "../database/repositories/options.js";
 import { PluginStorageRepository } from "../database/repositories/plugin-storage.js";
@@ -27,6 +28,7 @@ import { enrichImageMetadata } from "../media/enrich.js";
 import { markContentMediaUsageCollectionStaleSafely } from "../media/usage/content-refresh.js";
 import { invalidateSiteSettingsCache } from "../settings/index.js";
 import type { Storage } from "../storage/types.js";
+import { assertStorageKey } from "./conditional-storage.js";
 import { CronAccessImpl } from "./cron.js";
 import type { EmailPipeline } from "./email.js";
 import type {
@@ -76,6 +78,18 @@ export function createKVAccess(optionsRepo: OptionsRepository, pluginId: string)
 		async get<T>(key: string): Promise<T | null> {
 			return optionsRepo.get<T>(`${prefix}${key}`);
 		},
+		async getVersioned<T>(key: string) {
+			assertStorageKey(key);
+			return optionsRepo.getVersioned<T>(`${prefix}${key}`);
+		},
+		async compareAndSet(key, expectedRevision, value) {
+			assertStorageKey(key);
+			return optionsRepo.compareAndSet(`${prefix}${key}`, expectedRevision, value);
+		},
+		async compareAndDelete(key, expectedRevision) {
+			assertStorageKey(key);
+			return optionsRepo.compareAndDelete(`${prefix}${key}`, expectedRevision);
+		},
 
 		async set(key: string, value: unknown): Promise<void> {
 			await optionsRepo.set(`${prefix}${key}`, value);
@@ -118,6 +132,9 @@ function createStorageCollection<T>(
 
 	return {
 		get: (id) => repo.get(id),
+		getVersioned: (id) => repo.getVersioned(id),
+		compareAndSet: (id, expectedRevision, data) => repo.compareAndSet(id, expectedRevision, data),
+		compareAndDelete: (id, expectedRevision) => repo.compareAndDelete(id, expectedRevision),
 		put: (id, data) => repo.put(id, data),
 		delete: (id) => repo.delete(id),
 		exists: (id) => repo.exists(id),
@@ -125,6 +142,7 @@ function createStorageCollection<T>(
 		putMany: (items) => repo.putMany(items),
 		deleteMany: (ids) => repo.deleteMany(ids),
 		count: (where) => repo.count(where),
+		updateIf: (id, updateArgs) => repo.updateIf(id, updateArgs),
 
 		// Query returns PaginatedResult instead of the old format
 		async query(options?: QueryOptions): Promise<PaginatedResult<{ id: string; data: T }>> {
@@ -500,6 +518,9 @@ export function createContentAccessWithWrite(
 			const contentRepo = new ContentRepository(db);
 			const deleted = await contentRepo.delete(collection, id);
 			if (deleted) {
+				// A trashed entry can no longer be opened, so its holder can never
+				// release the lease itself. Mirrors handleContentDelete.
+				await new EntryLockRepository(db).releaseEntry(collection, id);
 				await markContentMediaUsageCollectionStaleSafely(db, collection, "CONTENT_USAGE_STALE");
 			}
 			return deleted;
@@ -706,11 +727,31 @@ function isHostAllowed(host: string, allowedHosts: string[]): boolean {
 	});
 }
 
+function tryParsePluginHttpTarget(url: string): URL | null {
+	try {
+		return new URL(url);
+	} catch {
+		return null;
+	}
+}
+
+async function validatePluginHttpTarget(pluginId: string, url: string): Promise<URL> {
+	try {
+		return await resolveAndValidateExternalUrl(url);
+	} catch (error) {
+		const message = error instanceof SsrfError ? error.message : "SSRF validation failed";
+		const target = tryParsePluginHttpTarget(url);
+		throw new Error(
+			`Plugin "${pluginId}": blocked fetch to "${target ? target.hostname : "invalid URL"}": ${message}`,
+			{ cause: error },
+		);
+	}
+}
+
 /**
- * Create HTTP access with host validation.
+ * Create HTTP access with host validation and SSRF protection.
  *
- * Uses redirect: "manual" to re-validate each redirect target against
- * the allowedHosts list, preventing redirects to unauthorized hosts.
+ * Uses redirect: "manual" to re-validate each redirect target before dispatch.
  */
 export function createHttpAccess(pluginId: string, allowedHosts: string[]): HttpAccess {
 	return {
@@ -727,13 +768,14 @@ export function createHttpAccess(pluginId: string, allowedHosts: string[]): Http
 			let currentInit = init;
 
 			for (let i = 0; i <= MAX_PLUGIN_REDIRECTS; i++) {
-				const hostname = new URL(currentUrl).hostname;
-				if (!isHostAllowed(hostname, allowedHosts)) {
+				const target = tryParsePluginHttpTarget(currentUrl);
+				if (target && !isHostAllowed(target.hostname, allowedHosts)) {
 					throw new Error(
-						`Plugin "${pluginId}" is not allowed to fetch from host "${hostname}". ` +
+						`Plugin "${pluginId}" is not allowed to fetch from host "${target.hostname}". ` +
 							`Allowed hosts: ${allowedHosts.join(", ")}`,
 					);
 				}
+				await validatePluginHttpTarget(pluginId, currentUrl);
 
 				const response = await globalThis.fetch(currentUrl, {
 					...currentInit,
@@ -778,17 +820,7 @@ export function createUnrestrictedHttpAccess(pluginId: string): HttpAccess {
 			let currentInit = init;
 
 			for (let i = 0; i <= MAX_PLUGIN_REDIRECTS; i++) {
-				// Validate each URL against SSRF rules (private IPs, metadata
-				// endpoints, wildcard DNS, resolved-IP private ranges).
-				try {
-					await resolveAndValidateExternalUrl(currentUrl);
-				} catch (e) {
-					const msg = e instanceof SsrfError ? e.message : "SSRF validation failed";
-					throw new Error(
-						`Plugin "${pluginId}": blocked fetch to "${new URL(currentUrl).hostname}": ${msg}`,
-						{ cause: e },
-					);
-				}
+				await validatePluginHttpTarget(pluginId, currentUrl);
 
 				const response = await globalThis.fetch(currentUrl, {
 					...currentInit,

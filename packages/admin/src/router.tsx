@@ -41,6 +41,7 @@ import { ContentTypeEditor } from "./components/ContentTypeEditor";
 import { ContentTypeList } from "./components/ContentTypeList";
 import { Dashboard } from "./components/Dashboard";
 import { DeviceAuthorizePage } from "./components/DeviceAuthorizePage";
+import { EntryLockNotice } from "./components/EntryLockNotice";
 import { InviteAcceptPage } from "./components/InviteAcceptPage";
 import { LoginPage } from "./components/LoginPage";
 import { MarketplaceBrowse } from "./components/MarketplaceBrowse";
@@ -144,6 +145,7 @@ import { runBulkAction } from "./lib/bulk";
 import { usePluginPage } from "./lib/plugin-context";
 import { getPluginBlocks } from "./lib/pluginBlocks";
 import { sanitizeRedirectUrl } from "./lib/url";
+import { useEntryLock } from "./lib/useEntryLock";
 import { BylineSchemaPage } from "./routes/byline-schema";
 import { BylinesPage } from "./routes/bylines";
 import { UsersPage } from "./routes/users";
@@ -865,6 +867,12 @@ function ContentEditPage() {
 		queryFn: () => fetchContent(collection, id, { locale: activeLocale }),
 		enabled: !i18n || !!activeLocale,
 	});
+	const entryLock = useEntryLock({
+		collection,
+		entryId: id,
+		locale: activeLocale,
+		ready: Boolean(rawItem),
+	});
 	const revisionTokensRef = React.useRef(new Map<string, string | undefined>());
 	const activeRevisionEntryRef = React.useRef("");
 	if (activeRevisionEntryRef.current !== id) {
@@ -875,6 +883,7 @@ function ContentEditPage() {
 		revisionTokensRef.current.set(rawItem.id, rawItem._rev);
 	}
 	const editorSaveQueueRef = React.useRef<Promise<void>>(Promise.resolve());
+	const unpublishRequestRef = React.useRef<Promise<void> | null>(null);
 	const serializeEditorSave = React.useCallback(<T,>(operation: () => Promise<T>) => {
 		const result = editorSaveQueueRef.current.then(operation);
 		editorSaveQueueRef.current = result.then(
@@ -1058,14 +1067,15 @@ function ContentEditPage() {
 		[activeLocale, collection, rawItem?.locale],
 	);
 	const handleContentUpdateError = React.useCallback(
-		(error: unknown) => {
+		(error: unknown, targetId: string) => {
+			if (entryLock.reportWriteError(error, targetId)) return;
 			toastManager.add({
 				title: t`Failed to save`,
 				description: error instanceof Error ? error.message : t`An error occurred`,
 				type: "error",
 			});
 		},
-		[t, toastManager],
+		[entryLock.reportWriteError, t, toastManager],
 	);
 
 	const updateMutation = useMutation({
@@ -1090,7 +1100,7 @@ function ContentEditPage() {
 		},
 		onError: async (error, variables) => {
 			if (isSaveConflict(error) && (await recoverFromSaveConflict(variables.targetId))) return;
-			handleContentUpdateError(error);
+			handleContentUpdateError(error, variables.targetId);
 		},
 		onSettled: (_, __, variables) => {
 			if (variables.source === "editor") {
@@ -1112,7 +1122,7 @@ function ContentEditPage() {
 		onSuccess: () => {
 			handleContentUpdateSuccess(id);
 		},
-		onError: handleContentUpdateError,
+		onError: (error) => handleContentUpdateError(error, id),
 	});
 
 	// Autosave mutation - skips revision creation
@@ -1145,6 +1155,7 @@ function ContentEditPage() {
 		onError: async (err, variables) => {
 			if (isSaveConflict(err) && (await recoverFromSaveConflict(variables.targetId))) return;
 			if (isTerminalRequestError(err)) recordAutosaveRejection(variables.targetId);
+			if (entryLock.reportWriteError(err, variables.targetId)) return;
 			toastManager.add({
 				title: t`Autosave failed`,
 				description: err instanceof Error ? err.message : t`An error occurred`,
@@ -1169,6 +1180,7 @@ function ContentEditPage() {
 			toastManager.add({ title: t`Published`, description: t`Content is now live` });
 		},
 		onError: (error) => {
+			if (entryLock.reportWriteError(error, id)) return;
 			toastManager.add({
 				title: t`Failed to publish`,
 				description: error instanceof Error ? error.message : t`An error occurred`,
@@ -1178,8 +1190,13 @@ function ContentEditPage() {
 	});
 
 	const unpublishMutation = useMutation({
-		mutationFn: () => unpublishContent(collection, id, { locale: rawItem?.locale ?? activeLocale }),
-		onSuccess: () => {
+		mutationFn: (_rev?: string) =>
+			unpublishContent(collection, id, {
+				locale: rawItem?.locale ?? activeLocale,
+				_rev,
+			}),
+		onSuccess: (unpublishedItem) => {
+			revisionTokensRef.current.set(id, unpublishedItem._rev);
 			void queryClient.invalidateQueries({
 				queryKey: ["content", collection, id],
 			});
@@ -1187,6 +1204,7 @@ function ContentEditPage() {
 			toastManager.add({ title: t`Unpublished`, description: t`Content removed from public view` });
 		},
 		onError: (error) => {
+			if (entryLock.reportWriteError(error, id)) return;
 			toastManager.add({
 				title: t`Failed to unpublish`,
 				description: error instanceof Error ? error.message : t`An error occurred`,
@@ -1197,8 +1215,9 @@ function ContentEditPage() {
 
 	const discardDraftMutation = useMutation({
 		mutationFn: () => discardDraft(collection, id, { locale: rawItem?.locale ?? activeLocale }),
-		onSuccess: () => {
+		onSuccess: (discardedItem) => {
 			setConflictedEntryId((conflicted) => (conflicted === id ? "" : conflicted));
+			revisionTokensRef.current.set(id, discardedItem._rev);
 			void queryClient.invalidateQueries({
 				queryKey: ["content", collection, id],
 			});
@@ -1209,6 +1228,7 @@ function ContentEditPage() {
 			});
 		},
 		onError: (error) => {
+			if (entryLock.reportWriteError(error, id)) return;
 			toastManager.add({
 				title: t`Failed to discard changes`,
 				description: error instanceof Error ? error.message : t`An error occurred`,
@@ -1254,6 +1274,7 @@ function ContentEditPage() {
 			});
 		},
 		onError: (error) => {
+			if (entryLock.reportWriteError(error, id)) return;
 			toastManager.add({
 				title: t`Failed to schedule`,
 				description: error instanceof Error ? error.message : t`An error occurred`,
@@ -1272,6 +1293,7 @@ function ContentEditPage() {
 			});
 		},
 		onError: (error) => {
+			if (entryLock.reportWriteError(error, id)) return;
 			toastManager.add({
 				title: t`Failed to unschedule`,
 				description: error instanceof Error ? error.message : t`An error occurred`,
@@ -1323,6 +1345,7 @@ function ContentEditPage() {
 			});
 		},
 		onError: (error) => {
+			if (entryLock.reportWriteError(error, id)) return;
 			toastManager.add({
 				title: t`Failed to delete`,
 				description: error instanceof Error ? error.message : t`An error occurred`,
@@ -1449,8 +1472,42 @@ function ContentEditPage() {
 		],
 	);
 	const handleUnpublish = React.useCallback(
-		() => unpublishMutation.mutate(),
-		[unpublishMutation.mutate],
+		async (payload?: {
+			data: Record<string, unknown>;
+			slug?: string;
+			bylines?: BylineCreditInput[];
+		}) => {
+			if (unpublishRequestRef.current) return unpublishRequestRef.current;
+
+			const request = (async () => {
+				const savedItem = await serializeEditorSave(async () => {
+					if (!payload) return;
+					return updateMutation.mutateAsync({
+						targetId: id,
+						targetLocale: rawItem?.locale ?? activeLocale,
+						source: "editor",
+						changes: payload,
+					});
+				});
+				const currentToken = savedItem?._rev ?? revisionTokensRef.current.get(id);
+				await unpublishMutation.mutateAsync(currentToken);
+			})();
+			unpublishRequestRef.current = request;
+			void request
+				.catch(() => undefined)
+				.finally(() => {
+					if (unpublishRequestRef.current === request) unpublishRequestRef.current = null;
+				});
+			return request;
+		},
+		[
+			activeLocale,
+			id,
+			rawItem?.locale,
+			serializeEditorSave,
+			unpublishMutation.mutateAsync,
+			updateMutation.mutateAsync,
+		],
 	);
 	const handleDiscardDraft = React.useCallback(
 		() => discardDraftMutation.mutate(),
@@ -1529,6 +1586,14 @@ function ContentEditPage() {
 			updateBylineMutation.mutateAsync({ id: bylineId, ...input }),
 		[updateBylineMutation.mutateAsync],
 	);
+	const handleRevisionRestored = React.useCallback(
+		(restoredItem: ContentItem) => {
+			if (restoredItem._rev) {
+				revisionTokensRef.current.set(id, restoredItem._rev);
+			}
+		},
+		[id],
+	);
 
 	if (!manifest) {
 		return <LoadingScreen />;
@@ -1566,6 +1631,7 @@ function ContentEditPage() {
 			onPublish={handlePublish}
 			onUnpublish={handleUnpublish}
 			onDiscardDraft={handleDiscardDraft}
+			onRevisionRestored={handleRevisionRestored}
 			onSchedule={handleSchedule}
 			onUnschedule={handleUnschedule}
 			isScheduling={scheduleMutation.isPending}
@@ -1591,6 +1657,15 @@ function ContentEditPage() {
 			onQuickCreateByline={handleQuickCreateByline}
 			onQuickEditByline={handleQuickEditByline}
 			manifest={manifest ?? null}
+			readOnly={entryLock.readOnly}
+			notice={
+				<EntryLockNotice
+					state={entryLock.state}
+					onTakeOver={entryLock.takeOver}
+					onReadInstead={entryLock.readInstead}
+					isTakingOver={entryLock.isTakingOver}
+				/>
+			}
 		/>
 	);
 }
@@ -2204,6 +2279,25 @@ const marketplaceDetailRoute = createRoute({
 	component: MarketplaceDetailPage,
 });
 
+const registryDetailRoute = createRoute({
+	getParentRoute: () => adminLayoutRoute,
+	path: "/plugins/registry/$publisher/$slug",
+	component: RegistryDetailPage,
+});
+
+function RegistryDetailPage() {
+	const { t } = useLingui();
+	const { publisher, slug } = useParams({
+		from: "/_admin/plugins/registry/$publisher/$slug",
+	});
+	const { data: manifest } = useQuery({
+		queryKey: ["manifest"],
+		queryFn: fetchManifest,
+	});
+	if (!manifest?.registry) return <NotFoundPage message={t`Plugin registry is not configured.`} />;
+	return <RegistryPluginDetail pluginId={`${publisher}/${slug}`} config={manifest.registry} />;
+}
+
 function MarketplaceDetailPage() {
 	const { pluginId } = useParams({ from: "/_admin/plugins/marketplace/$pluginId" });
 
@@ -2646,6 +2740,7 @@ const adminRoutes = adminLayoutRoute.addChildren([
 	pluginManagerRoute,
 	pluginSettingsRoute,
 	marketplaceDetailRoute,
+	registryDetailRoute,
 	marketplaceBrowseRoute,
 	themeMarketplaceBrowseRoute,
 	themeMarketplaceDetailRoute,

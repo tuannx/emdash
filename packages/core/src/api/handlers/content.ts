@@ -15,6 +15,7 @@ import {
 	isSystemOrderField,
 	type ContentRevisionPrecondition,
 } from "../../database/repositories/content.js";
+import { EntryLockRepository } from "../../database/repositories/entry-locks.js";
 import { RedirectRepository } from "../../database/repositories/redirect.js";
 import { RevisionRepository } from "../../database/repositories/revision.js";
 import { SeoRepository } from "../../database/repositories/seo.js";
@@ -425,6 +426,8 @@ async function createSlugChangeRedirect(
 	oldSlug: string,
 	newSlug: string,
 	contentId: string,
+	oldPublishedAt: string | null,
+	newPublishedAt: string | null,
 ): Promise<void> {
 	// A URL pattern has no locale token, so every locale variant of an entry
 	// generates the same URL, and slugs are unique per (slug, locale) — a
@@ -448,6 +451,8 @@ async function createSlugChangeRedirect(
 		newSlug,
 		contentId,
 		collectionRow?.url_pattern ?? null,
+		oldPublishedAt,
+		newPublishedAt,
 	);
 	invalidateRedirectCache();
 }
@@ -1095,17 +1100,27 @@ export async function handleContentUpdate(
 				updated.primaryBylineId = credits[0]?.byline.translationGroup ?? null;
 			}
 
-			// Create auto-redirect when slug changes
+			// Create auto-redirect when slug changes. Date tokens in the URL
+			// pattern resolve from the publish date, so the old URL uses the
+			// pre-update date (the URL that was actually live) and the new URL
+			// the post-update one.
 			if (oldSlug && body.slug) {
-				await createSlugChangeRedirect(trx, collection, oldSlug, body.slug, resolvedId);
+				await createSlugChangeRedirect(
+					trx,
+					collection,
+					oldSlug,
+					body.slug,
+					resolvedId,
+					existing?.publishedAt ?? null,
+					updated.publishedAt ?? null,
+				);
 			}
 
 			// Sync non-translatable fields to sibling locales in the same
 			// translation group. Only runs when i18n is enabled, data was updated,
 			// and the item belongs to a translation group with siblings.
 			if (isI18nEnabled() && body.data && updated.translationGroup) {
-				await syncNonTranslatableFields(
-					trx,
+				await trxRepo.syncNonTranslatableFields(
 					collection,
 					updated.id,
 					updated.translationGroup,
@@ -1283,10 +1298,11 @@ export async function handleContentDelete(
 		const result = await withTransaction(db, async (trx) => {
 			const repo = new ContentRepository(trx);
 			const resolvedId = (await resolveId(repo, collection, id)) ?? id;
-			return {
-				id: resolvedId,
-				deleted: await repo.delete(collection, resolvedId),
-			};
+			const deleted = await repo.delete(collection, resolvedId);
+			if (deleted) {
+				await new EntryLockRepository(trx).releaseEntry(collection, resolvedId);
+			}
+			return { id: resolvedId, deleted };
 		});
 
 		if (!result.deleted) {
@@ -1372,6 +1388,7 @@ export async function handleContentPermanentDelete(
 		// Wrap content delete + SEO/comment cleanup in a transaction
 		const deleted = await withTransaction(db, async (trx) => {
 			const trxRepo = new ContentRepository(trx);
+			const item = await trxRepo.findByIdIncludingTrashed(collection, resolvedId);
 			const wasDeleted = await trxRepo.permanentDelete(collection, resolvedId);
 
 			if (wasDeleted) {
@@ -1384,6 +1401,22 @@ export async function handleContentPermanentDelete(
 				// Clean up revisions for permanently deleted content
 				const revisionRepo = new RevisionRepository(trx);
 				await revisionRepo.deleteByEntry(collection, resolvedId);
+				await new EntryLockRepository(trx).releaseEntry(collection, resolvedId);
+				// Term assignments are keyed by translation_group, so they belong to the
+				// group rather than to this row. They go only once no row of the group is
+				// left, trashed ones included, since a trashed row can still be restored.
+				if (item?.translationGroup) {
+					const groupSurvives = await trxRepo.hasTranslationsIncludingTrashed(
+						collection,
+						item.translationGroup,
+					);
+					if (!groupSurvives) {
+						await new TaxonomyRepository(trx).clearEntryGroupTerms(
+							collection,
+							item.translationGroup,
+						);
+					}
+				}
 			}
 
 			return wasDeleted;
@@ -1593,7 +1626,7 @@ export async function handleContentUnschedule(
  * Publish content immediately.
  *
  * Publication is one atomic content-row statement. On databases that support
- * transactions, the existing slug-redirect side write remains grouped with it.
+ * transactions, the slug redirect and the locale sync stay grouped with it.
  */
 export async function handleContentPublish(
 	db: Kysely<Database>,
@@ -1631,6 +1664,21 @@ export async function handleContentPublish(
 				expectedRevision,
 			);
 
+			if (
+				existing &&
+				isI18nEnabled() &&
+				publishConfig.supportsRevisions &&
+				published.translationGroup
+			) {
+				await repo.syncNonTranslatableFields(
+					collection,
+					published.id,
+					published.translationGroup,
+					published.data,
+					{ previous: existing.data },
+				);
+			}
+
 			// Leave a 301 behind when publishing changed the slug of an entry that
 			// was already published — its old URL was live and may be indexed or
 			// linked. A first publish is excluded: a draft's URL was never public.
@@ -1640,7 +1688,15 @@ export async function handleContentPublish(
 				published.slug &&
 				existing.slug !== published.slug
 			) {
-				await createSlugChangeRedirect(trx, collection, existing.slug, published.slug, resolvedId);
+				await createSlugChangeRedirect(
+					trx,
+					collection,
+					existing.slug,
+					published.slug,
+					resolvedId,
+					existing.publishedAt ?? null,
+					published.publishedAt ?? null,
+				);
 			}
 
 			return published;
@@ -1984,75 +2040,6 @@ export async function handleContentTranslations(
 			},
 		};
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Non-translatable field sync
-// ---------------------------------------------------------------------------
-
-/**
- * Sync non-translatable fields to sibling locales.
- *
- * When a content item is updated and it belongs to a translation group,
- * any non-translatable fields in the update data are written to all other
- * rows in the same translation group within the same transaction.
- *
- * Non-translatable fields are **copied, not linked** — each row owns its
- * own data. This keeps queries simple and avoids cross-row joins.
- */
-async function syncNonTranslatableFields(
-	trx: Kysely<Database>,
-	collectionSlug: string,
-	updatedItemId: string,
-	translationGroup: string,
-	data: Record<string, unknown>,
-): Promise<void> {
-	// Get the collection to find its fields
-	const collection = await trx
-		.selectFrom("_emdash_collections")
-		.select("id")
-		.where("slug", "=", collectionSlug)
-		.executeTakeFirst();
-
-	if (!collection) return;
-
-	// Find non-translatable fields that are present in the update data
-	const fields = await trx
-		.selectFrom("_emdash_fields")
-		.select("slug")
-		.where("collection_id", "=", collection.id)
-		.where("translatable", "=", 0)
-		.execute();
-
-	const nonTranslatableSlugs = fields.map((f) => f.slug);
-	if (nonTranslatableSlugs.length === 0) return;
-
-	// Filter to only the non-translatable fields present in this update
-	const syncData: Record<string, unknown> = {};
-	for (const slug of nonTranslatableSlugs) {
-		if (slug in data) {
-			syncData[slug] = data[slug];
-		}
-	}
-	if (Object.keys(syncData).length === 0) return;
-
-	// Build the SET clause for sibling rows
-	validateIdentifier(collectionSlug, "collection slug");
-	const tableName = `ec_${collectionSlug}`;
-
-	// Update all sibling rows (same translation_group, different id)
-	const setClauses = Object.entries(syncData).map(([key, value]) => {
-		validateIdentifier(key, "field slug");
-		const serialized = typeof value === "object" && value !== null ? JSON.stringify(value) : value;
-		return sql`${sql.ref(key)} = ${serialized}`;
-	});
-
-	await sql`
-		UPDATE ${sql.ref(tableName)}
-		SET ${sql.join(setClauses, sql`, `)}
-		WHERE translation_group = ${translationGroup}
-		AND id != ${updatedItemId}
-	`.execute(trx);
 }
 
 /**

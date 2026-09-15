@@ -13,6 +13,8 @@ export type {
 	UserTable,
 	MediaTable,
 } from "./database/index.js";
+export { EmDashConfigurationError } from "./config/errors.js";
+export type { EmDashConfigurationErrorCode } from "./config/errors.js";
 
 // Repositories
 export {
@@ -124,6 +126,10 @@ export type {
 	PortableTextImageBlock,
 	PortableTextCodeBlock,
 	PortableTextHtmlBlock,
+	PortableTextTableAlignment,
+	PortableTextTableBlock,
+	PortableTextTableCell,
+	PortableTextTableRow,
 	PortableTextUnknownBlock,
 	ProseMirrorMark,
 	ProseMirrorNode,
@@ -255,6 +261,7 @@ export {
 	PluginManager,
 	createPluginManager,
 	PluginRouteError,
+	StorageSerializationError,
 	ContentSaveRejectedError,
 	isContentSaveRejection,
 	// Scheduler (Node timer heartbeat — used by virtual:emdash/scheduler)
@@ -282,6 +289,12 @@ export type {
 	PluginContext,
 	PluginStorageConfig,
 	StorageCollection,
+	NumericDelta,
+	UpdateIfArgs,
+	UpdateIfResult,
+	VersionedValue,
+	ConditionalWriteResult,
+	ConditionalDeleteResult,
 	KVAccess,
 	ContentAccess,
 	ContentCreateOptions,
@@ -297,6 +310,7 @@ export type {
 	HookName,
 	ResolvedHook,
 	ResolvedPluginHooks,
+	ActorInfo,
 	ContentHookEvent,
 	ContentDeleteEvent,
 	ContentPublishStateChangeEvent,

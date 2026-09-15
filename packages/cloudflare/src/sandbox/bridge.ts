@@ -9,19 +9,29 @@
 
 import type { D1Database } from "@cloudflare/workers-types";
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { ContentCreateOptions, Database, I18nConfig, SandboxEmailSendCallback } from "emdash";
+import type {
+	ConditionalDeleteResult,
+	ConditionalWriteResult,
+	ContentCreateOptions,
+	Database,
+	I18nConfig,
+	SandboxEmailSendCallback,
+	VersionedValue,
+} from "emdash";
 import {
 	ContentRepository,
 	createSandboxRouteError,
 	getSandboxRouteErrorDetails,
 	ulid,
 	PluginStorageRepository,
+	StorageSerializationError,
 	resolveContentCreateLocale,
 } from "emdash";
 import { Kysely } from "kysely";
 import { D1Dialect } from "kysely-d1";
 
 import { sandboxHttpFetch } from "./bridge-http.js";
+import type { StorageUpdateIfResponse } from "./types.js";
 
 /** Regex to validate collection names (prevent SQL injection) */
 const COLLECTION_NAME_REGEX = /^[a-z][a-z0-9_]*$/;
@@ -289,10 +299,29 @@ export class PluginBridge extends WorkerEntrypoint<PluginBridgeEnv, PluginBridge
 	async kvSet(key: string, value: unknown): Promise<void> {
 		const { pluginId } = this.ctx.props;
 		await this.env.DB.prepare(
-			"INSERT OR REPLACE INTO _plugin_storage (plugin_id, collection, id, data, updated_at) VALUES (?, '__kv', ?, ?, datetime('now'))",
+			"INSERT OR REPLACE INTO _plugin_storage (plugin_id, collection, id, data, revision, updated_at) VALUES (?, '__kv', ?, ?, ?, datetime('now'))",
 		)
-			.bind(pluginId, key, JSON.stringify(value))
+			.bind(pluginId, key, JSON.stringify(value), crypto.randomUUID())
 			.run();
+	}
+
+	async kvGetVersioned(key: string): Promise<VersionedValue | null> {
+		return this.getStorageRepo("__kv").getVersioned(key);
+	}
+
+	async kvCompareAndSet(
+		key: string,
+		expectedRevision: string | null,
+		value: unknown,
+	): Promise<ConditionalWriteResult> {
+		return this.getStorageRepo("__kv").compareAndSet(key, expectedRevision, value);
+	}
+
+	async kvCompareAndDelete(
+		key: string,
+		expectedRevision: string,
+	): Promise<ConditionalDeleteResult> {
+		return this.getStorageRepo("__kv").compareAndDelete(key, expectedRevision);
 	}
 
 	async kvDelete(key: string): Promise<boolean> {
@@ -343,10 +372,67 @@ export class PluginBridge extends WorkerEntrypoint<PluginBridgeEnv, PluginBridge
 			throw new Error(`Storage collection not declared: ${collection}`);
 		}
 		await this.env.DB.prepare(
-			"INSERT OR REPLACE INTO _plugin_storage (plugin_id, collection, id, data, updated_at) VALUES (?, ?, ?, ?, datetime('now'))",
+			"INSERT OR REPLACE INTO _plugin_storage (plugin_id, collection, id, data, revision, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'))",
 		)
-			.bind(pluginId, collection, id, JSON.stringify(data))
+			.bind(pluginId, collection, id, JSON.stringify(data), crypto.randomUUID())
 			.run();
+	}
+
+	async storageGetVersioned(collection: string, id: string): Promise<VersionedValue | null> {
+		if (!this.ctx.props.storageCollections.includes(collection)) {
+			throw new Error(`Storage collection not declared: ${collection}`);
+		}
+		return this.getStorageRepo(collection).getVersioned(id);
+	}
+
+	async storageCompareAndSet(
+		collection: string,
+		id: string,
+		expectedRevision: string | null,
+		data: unknown,
+	): Promise<ConditionalWriteResult> {
+		if (!this.ctx.props.storageCollections.includes(collection)) {
+			throw new Error(`Storage collection not declared: ${collection}`);
+		}
+		return this.getStorageRepo(collection).compareAndSet(id, expectedRevision, data);
+	}
+
+	async storageCompareAndDelete(
+		collection: string,
+		id: string,
+		expectedRevision: string,
+	): Promise<ConditionalDeleteResult> {
+		if (!this.ctx.props.storageCollections.includes(collection)) {
+			throw new Error(`Storage collection not declared: ${collection}`);
+		}
+		return this.getStorageRepo(collection).compareAndDelete(id, expectedRevision);
+	}
+
+	async storageUpdateIf(
+		collection: string,
+		id: string,
+		args: unknown,
+	): Promise<StorageUpdateIfResponse> {
+		if (!this.ctx.props.storageCollections.includes(collection)) {
+			throw new Error(`Storage collection not declared: ${collection}`);
+		}
+		try {
+			return await this.getStorageRepo(collection).updateIf(id, args);
+		} catch (error) {
+			if (!(error instanceof StorageSerializationError)) throw error;
+			return {
+				__emdashStorageError: {
+					name: "StorageSerializationError",
+					code: "STORAGE_SERIALIZATION_FAILURE",
+					retryable: true,
+					...(error.sqlState === "40001" || error.sqlState === "40P01"
+						? { sqlState: error.sqlState }
+						: {}),
+					message:
+						"Storage write must be retried. Restart the transaction before retrying when using an explicit transaction.",
+				},
+			};
+		}
 	}
 
 	async storageDelete(collection: string, id: string): Promise<boolean> {
@@ -436,13 +522,11 @@ export class PluginBridge extends WorkerEntrypoint<PluginBridgeEnv, PluginBridge
 		}
 		if (items.length === 0) return;
 
-		// D1 doesn't support batch in prepare, so we do individual inserts
-		// In future, we could use batch API
 		for (const item of items) {
 			await this.env.DB.prepare(
-				"INSERT OR REPLACE INTO _plugin_storage (plugin_id, collection, id, data, updated_at) VALUES (?, ?, ?, ?, datetime('now'))",
+				"INSERT OR REPLACE INTO _plugin_storage (plugin_id, collection, id, data, revision, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'))",
 			)
-				.bind(pluginId, collection, item.id, JSON.stringify(item.data))
+				.bind(pluginId, collection, item.id, JSON.stringify(item.data), crypto.randomUUID())
 				.run();
 		}
 	}

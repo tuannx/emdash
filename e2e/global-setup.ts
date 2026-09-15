@@ -328,17 +328,25 @@ export default async function globalSetup(): Promise<void> {
 		cwd: workDir,
 		env: {
 			...process.env,
+			// Keep Astro's agent-mode server in this process so teardown owns it.
+			ASTRO_DEV_BACKGROUND: "1",
 			EMDASH_TEST_DB: `file:${dbPath}`,
 			EMDASH_MARKETPLACE_URL: marketplaceUrl,
 		},
 		stdio: "pipe",
 	});
 
+	let serverOutput = "";
+	const appendServerOutput = (data: Buffer) => {
+		const chunk = data.toString();
+		serverOutput = (serverOutput + chunk).slice(-20_000);
+		if (process.env.DEBUG) process.stderr.write(`[pw:${PORT}] ${chunk}`);
+	};
 	server.stdout?.on("data", (data: Buffer) => {
-		if (process.env.DEBUG) process.stderr.write(`[pw:${PORT}] ${data.toString()}`);
+		appendServerOutput(data);
 	});
 	server.stderr?.on("data", (data: Buffer) => {
-		if (process.env.DEBUG) process.stderr.write(`[pw:${PORT}] ${data.toString()}`);
+		appendServerOutput(data);
 	});
 
 	try {
@@ -384,18 +392,6 @@ export default async function globalSetup(): Promise<void> {
 			}
 		}
 
-		// 5c. Warm the admin's data routes so the SPA's first client-side fetches
-		// don't race the dev optimizer. On a slow CI runner the Cloudflare runner
-		// otherwise serves a cold 500 for these, rendering an empty admin and
-		// failing the first specs before the route finishes compiling.
-		console.log("[pw] Warming up admin API routes...");
-		for (const path of [
-			"/_emdash/api/schema/collections?includeFields=true",
-			"/_emdash/api/media",
-		]) {
-			await waitForOk(`${baseUrl}${path}`, 60_000, token);
-		}
-
 		// 6. Write server info
 		const info = {
 			pid: server.pid!,
@@ -415,6 +411,9 @@ export default async function globalSetup(): Promise<void> {
 	} catch (error) {
 		server.kill("SIGTERM");
 		marketplaceServer.close();
-		throw error;
+		throw new Error(
+			`${error instanceof Error ? error.message : String(error)}\n\nServer output:\n${serverOutput}`,
+			{ cause: error },
+		);
 	}
 }
